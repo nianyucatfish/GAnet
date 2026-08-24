@@ -160,7 +160,11 @@ jobs:
             $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"
           }
-          $checksums | Set-Content -Encoding ASCII artifacts/out/SHA256SUMS.txt
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD "artifacts/out/SHA256SUMS.txt"),
+            (($checksums -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
           @{
             schema = 1
             repository = $env:GITHUB_REPOSITORY
@@ -168,7 +172,13 @@ jobs:
             version = $env:VERSION
             workflow_run = $env:GITHUB_RUN_ID
             artifacts = $files.Name
-          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 artifacts/out/provenance.json
+          } | ConvertTo-Json -Depth 4 | ForEach-Object {
+            [IO.File]::WriteAllText(
+              (Join-Path $PWD "artifacts/out/provenance.json"),
+              ($_ + "`n"),
+              [Text.UTF8Encoding]::new($false)
+            )
+          }
 
       - name: Verify release artifacts
         shell: pwsh
