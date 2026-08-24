@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Portable and sidecar build outputs
+runtime/
+*.exe
+*.dll
+*.msi
+*.zip
+*.tar.gz
+*.sha256
+
+# Go
+sidecar/ganet/ganet-sidecar*
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local state and sensitive material
+.env
+.env.*
+!.env.example
+*.log
+config.json
+mesh_receipt.json
+token.json
+*preauthkey*
+*private_key*
+*.pem
+*.key
