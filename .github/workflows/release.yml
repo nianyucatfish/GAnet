@@ -209,6 +209,14 @@ jobs:
           if ($componentVersion -ne $env:VERSION) {
             throw "Python component version does not match the workflow run"
           }
+          Push-Location $extract
+          try {
+            $env:PYTHONPATH = $sitePackages
+            & "$extract/runtime/python/python.exe" -m ganet --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Bundled GAnet launcher smoke test failed" }
+          } finally {
+            Pop-Location
+          }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
