@@ -58,6 +58,10 @@ def _request_json(url: str) -> Any:
             if len(data) > 8 * 1024 * 1024:
                 raise RuntimeError("GitHub API response exceeds its size limit")
             return json.loads(data)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404 and url == f"{GITHUB_API}/releases/latest":
+            return None
+        raise RuntimeError(f"GitHub API request failed: {url}") from exc
     except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError(f"GitHub API request failed: {url}") from exc
 
@@ -172,6 +176,8 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     release = _request_json(
         f"{GITHUB_API}/releases/tags/{urllib.parse.quote(tag)}" if tag else f"{GITHUB_API}/releases/latest"
     )
+    if release is None and tag is None:
+        return {"ok": True, "changed": False, "reason": "no published release"}
     if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
         raise RuntimeError("only published, non-prerelease releases may be mirrored")
     tag_name = str(release.get("tag_name") or "")
@@ -280,7 +286,7 @@ def sync(tag: str | None = None) -> dict[str, Any]:
                     "version": version_text}, indent=2).encode() + b"\n",
         mode=0o600,
     )
-    return {"ok": True, "version": version_text, "commit": commit}
+    return {"ok": True, "changed": True, "version": version_text, "commit": commit}
 
 
 def main() -> int:
