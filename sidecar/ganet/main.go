@@ -118,6 +118,10 @@ func writeJSON(value any) {
 	_ = enc.Encode(value)
 }
 
+func buildIdentity() map[string]any {
+	return map[string]any{"version": version, "commit": commit, "protocolVersion": protocolVersion}
+}
+
 func queryStatus() status {
 	client := http.Client{Timeout: 2 * time.Second}
 	response, err := client.Get("http://" + controlAddr + "/status")
@@ -412,7 +416,7 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "version":
-		writeJSON(map[string]any{"version": version, "protocolVersion": protocolVersion})
+		writeJSON(buildIdentity())
 	case "status":
 		writeJSON(queryStatus())
 	case "autostart":

@@ -2,6 +2,12 @@
 setlocal
 set "GANET_ROOT=%~dp0"
 
+if exist "%GANET_ROOT%runtime\python\python.exe" (
+  set "PYTHONPATH=%GANET_ROOT%runtime\site-packages"
+  "%GANET_ROOT%runtime\python\python.exe" -m ganet %*
+  exit /b %errorlevel%
+)
+
 if exist "%GANET_ROOT%runtime\python.exe" (
   "%GANET_ROOT%runtime\python.exe" -m ganet %*
   exit /b %errorlevel%

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ganet"
-version = "0.1.1"
+dynamic = ["version"]
 description = "GAnet desktop user center and device interconnect component"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,9 @@ dependencies = [
 
 [project.scripts]
 ganet = "ganet.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "ganet.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["ganet*"]

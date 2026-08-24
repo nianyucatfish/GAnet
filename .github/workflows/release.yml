@@ -1,0 +1,231 @@
+name: Build GAnet Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ganet-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows component and sidecar
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: sidecar/ganet/go.mod
+          cache-dependency-path: sidecar/ganet/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Resolve build identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            [[ "${GITHUB_REF_NAME}" == v* ]] || {
+              echo "Release tag must start with v" >&2
+              exit 1
+            }
+            VERSION="${GITHUB_REF_NAME#v}"
+            [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "Release tag must be v<major>.<minor>.<patch>" >&2
+              exit 1
+            }
+            RELEASE=true
+          else
+            VERSION="0.0.0.dev${GITHUB_RUN_NUMBER}"
+            RELEASE=false
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp Python component version
+        shell: python
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          init = Path("ganet/__init__.py")
+          value = init.read_text(encoding="utf-8")
+          value, count = re.subn(
+              r'^__version__ = "[^"]+"$',
+              f'__version__ = "{version}"',
+              value,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit("package version declaration was not found exactly once")
+          init.write_text(value, encoding="utf-8")
+
+      - name: Test Python component
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          python -m pytest tests/test_host_binding.py sidecar/ganet/network_component_test.py -q
+
+      - name: Test Go sidecar
+        working-directory: sidecar/ganet
+        run: go test ./...
+
+      - name: Build Windows sidecar
+        working-directory: sidecar/ganet
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../../artifacts
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA}" \
+            -o "../../artifacts/ganet-sidecar-windows-amd64-${VERSION}.exe" .
+          ../../artifacts/ganet-sidecar-windows-amd64-${VERSION}.exe version > ../../artifacts/sidecar-version.json
+
+      - name: Assemble Windows component
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = Join-Path $PWD "artifacts/GAnet-Windows-amd64"
+          $runtime = Join-Path $root "runtime"
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+
+          $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" } `
+            -Uri "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
+          $asset = $release.assets | Where-Object {
+            $_.name -match '^cpython-3\.12\.[0-9]+\+.*-x86_64-pc-windows-msvc-install_only\.tar\.gz$'
+          } | Select-Object -First 1
+          if (-not $asset) { throw "python-build-standalone Windows runtime was not found" }
+          Invoke-WebRequest -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" } `
+            -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP/python.tar.gz"
+          tar -xzf "$env:RUNNER_TEMP/python.tar.gz" -C $runtime
+          $python = Join-Path $runtime "python/python.exe"
+          & $python --version
+
+          $ucrt = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Redist" -Directory |
+            Sort-Object Name | ForEach-Object { Join-Path $_.FullName "ucrt/DLLs/x64" } |
+            Where-Object { Test-Path $_ } | Select-Object -Last 1
+          if (-not $ucrt) { throw "Windows SDK UCRT redist directory was not found" }
+          Copy-Item "$ucrt/api-ms-win-crt-*.dll" (Split-Path $python)
+          Copy-Item "$ucrt/ucrtbase.dll" (Split-Path $python)
+
+          & $python -m pip install --disable-pip-version-check --no-cache-dir `
+            --target "$runtime/site-packages" "."
+          Get-ChildItem "$runtime/python" -Filter "*.pdb" -Recurse | Remove-Item -Force
+
+          Copy-Item "ganet.cmd", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md" $root
+          Copy-Item "artifacts/ganet-sidecar-windows-amd64-$env:VERSION.exe" $root
+          Set-Content -Encoding ASCII -Path "$root/VERSION" -Value $env:VERSION
+          Set-Content -Encoding ASCII -Path "$root/COMMIT" -Value $env:GITHUB_SHA
+
+          New-Item -ItemType Directory -Force -Path "artifacts/out" | Out-Null
+          Compress-Archive -Path "$root/*" -DestinationPath `
+            "artifacts/out/GAnet-Windows-amd64-$env:VERSION.zip" -Force
+
+      - name: Generate checksums and provenance
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item "artifacts/ganet-sidecar-windows-amd64-$env:VERSION.exe" artifacts/out/
+          $files = Get-ChildItem artifacts/out -File | Sort-Object Name
+          if ($files.Count -ne 2) { throw "Unexpected release artifact set before metadata generation" }
+          $checksums = foreach ($file in $files) {
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $checksums | Set-Content -Encoding ASCII artifacts/out/SHA256SUMS.txt
+          @{
+            schema = 1
+            repository = $env:GITHUB_REPOSITORY
+            commit = $env:GITHUB_SHA
+            version = $env:VERSION
+            workflow_run = $env:GITHUB_RUN_ID
+            artifacts = $files.Name
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 artifacts/out/provenance.json
+
+      - name: Verify release artifacts
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sidecar = "artifacts/out/ganet-sidecar-windows-amd64-$env:VERSION.exe"
+          $component = "artifacts/out/GAnet-Windows-amd64-$env:VERSION.zip"
+          if (-not (Test-Path $sidecar) -or -not (Test-Path $component)) {
+            throw "Required release artifact is missing"
+          }
+          $identity = & $sidecar version | ConvertFrom-Json
+          if ($identity.version -ne $env:VERSION -or $identity.commit -ne $env:GITHUB_SHA -or `
+              $identity.protocolVersion -ne "1") {
+            throw "Sidecar build identity does not match the workflow run"
+          }
+          $extract = Join-Path $env:RUNNER_TEMP "ganet-component-check"
+          Expand-Archive -Path $component -DestinationPath $extract -Force
+          if (-not (Test-Path "$extract/ganet.cmd") -or `
+              -not (Test-Path "$extract/runtime/python/python.exe") -or `
+              -not (Test-Path "$extract/runtime/site-packages/ganet/__init__.py")) {
+            throw "GAnet component archive layout is invalid"
+          }
+          $sitePackages = (Resolve-Path "$extract/runtime/site-packages").Path
+          $componentVersion = (& "$extract/runtime/python/python.exe" -c `
+            "import sys; sys.path.insert(0, r'$sitePackages'); import ganet; print(ganet.__version__)" 2>&1).Trim()
+          if ($componentVersion -ne $env:VERSION) {
+            throw "Python component version does not match the workflow run"
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: GAnet-Windows-${{ steps.identity.outputs.version }}
+          path: artifacts/out/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ steps.identity.outputs.release == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || {
+            echo "Release tag must point to a commit on main" >&2
+            exit 1
+          }
+          cat > "${RUNNER_TEMP}/release-notes.md" <<EOF
+          GAnet ${VERSION}
+
+          - Windows GAnet component with bundled Python runtime
+          - Auditable Windows amd64 tsnet sidecar
+          - SHA-256 checksums and build provenance
+
+          The server mirror imports only published, non-draft, non-prerelease releases and signs its own sidecar manifest. Verify downloaded files against \`SHA256SUMS.txt\`.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" artifacts/out/* \
+            --verify-tag --title "GAnet ${VERSION}" --notes-file "${RUNNER_TEMP}/release-notes.md"

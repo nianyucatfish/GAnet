@@ -441,6 +441,9 @@ def install_release(verified: VerifiedRelease) -> dict[str, Any]:
         if binary.get("version") != verified.release["version"] or \
                 str(binary.get("protocolVersion")) != str(verified.release["protocol_version"]):
             raise RuntimeError("新 GAnet 网络组件版本检查未通过")
+        expected_commit = verified.release.get("commit")
+        if expected_commit and binary.get("commit") != expected_commit:
+            raise RuntimeError("新 GAnet 网络组件构建身份检查未通过")
         configured = (_ROOT / "config.json").is_file()
         if configured:
             _start()

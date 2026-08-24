@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GitHub for published GAnet releases
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+RandomizedDelaySec=3min
+Persistent=true
+Unit=ganet-release-sync.service
+
+[Install]
+WantedBy=timers.target

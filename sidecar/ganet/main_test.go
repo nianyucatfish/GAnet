@@ -60,6 +60,14 @@ func TestReconnectDelayBackoffAndCap(t *testing.T) {
 	}
 }
 
+func TestVersionCommandCarriesBuildIdentity(t *testing.T) {
+	got := buildIdentity()
+	if got["version"] != version || got["commit"] != commit ||
+		got["protocolVersion"] != protocolVersion {
+		t.Fatalf("unexpected build identity: %#v", got)
+	}
+}
+
 func TestStatusJSONCarriesBuildIdentity(t *testing.T) {
 	got := status{Version: version, Commit: commit, ProtocolVersion: protocolVersion, Installed: true}
 	value, err := json.Marshal(got)
