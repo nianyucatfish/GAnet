@@ -153,8 +153,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Copy-Item "artifacts/ganet-sidecar-windows-amd64-$env:VERSION.exe" artifacts/out/
+          Copy-Item "artifacts/sidecar-version.json" artifacts/out/
           $files = Get-ChildItem artifacts/out -File | Sort-Object Name
-          if ($files.Count -ne 2) { throw "Unexpected release artifact set before metadata generation" }
+          if ($files.Count -ne 3) { throw "Unexpected release artifact set before metadata generation" }
           $checksums = foreach ($file in $files) {
             $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"

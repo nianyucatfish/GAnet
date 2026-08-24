@@ -202,7 +202,8 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     by_name = {str(item.get("name")): item for item in assets if isinstance(item, dict)}
     sidecar_name = f"ganet-sidecar-windows-amd64-{version_text}.exe"
     component_name = f"GAnet-Windows-amd64-{version_text}.zip"
-    required = (sidecar_name, component_name, "SHA256SUMS.txt", "provenance.json")
+    identity_name = "sidecar-version.json"
+    required = (sidecar_name, component_name, identity_name, "SHA256SUMS.txt", "provenance.json")
     if any(name not in by_name for name in required):
         raise RuntimeError("GitHub release is missing required GAnet assets")
 
@@ -226,9 +227,9 @@ def sync(tag: str | None = None) -> dict[str, Any]:
                 if name in checksums:
                     raise RuntimeError(f"duplicate GitHub checksum entry: {name}")
                 checksums[name] = digest
-        if set(checksums) != {sidecar_name, component_name}:
+        if set(checksums) != {sidecar_name, component_name, identity_name}:
             raise RuntimeError("GitHub checksum file contains an unexpected artifact set")
-        for name in (sidecar_name, component_name):
+        for name in (sidecar_name, component_name, identity_name):
             if checksums.get(name) != downloaded[name][1]:
                 raise RuntimeError(f"GitHub checksum mismatch: {name}")
 
@@ -237,8 +238,11 @@ def sync(tag: str | None = None) -> dict[str, Any]:
         provenance_artifacts = provenance.get("artifacts")
         if provenance.get("repository") != REPOSITORY or provenance.get("version") != version_text or \
                 not COMMIT.fullmatch(commit) or not isinstance(provenance_artifacts, list) or \
-                sorted(provenance_artifacts) != sorted((sidecar_name, component_name)):
+                sorted(provenance_artifacts) != sorted((sidecar_name, component_name, identity_name)):
             raise RuntimeError("release provenance identity is invalid")
+        identity = json.loads(downloaded[identity_name][0].read_text(encoding="utf-8-sig"))
+        if identity != {"version": version_text, "commit": commit, "protocolVersion": "1"}:
+            raise RuntimeError("sidecar build identity does not match the release provenance")
         tag_ref = _request_json(
             f"{GITHUB_API}/git/ref/tags/{urllib.parse.quote(tag_name, safe='')}"
         )
