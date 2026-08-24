@@ -5,9 +5,10 @@ GenericAgent. Its user center runs independently; access to GenericAgent's
 computer atomic tools is an explicit, validated host binding rather than an
 installation inside the GenericAgent source tree.
 
-> Current status: local development baseline. Windows is the only supported
-> desktop platform in this first pass. Public release packaging and the final
-> download disclaimer are not complete yet.
+> Current status: standalone component and audited release pipeline baseline.
+> Windows is the only supported desktop platform in this first pass. Tagged
+> GitHub Releases publish the component and sidecar; the final end-user download
+> disclaimer is still being prepared.
 
 ## Repository layout
 
