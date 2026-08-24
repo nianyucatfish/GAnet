@@ -63,6 +63,13 @@ Development builds report version `dev`. Release builds will inject the exact
 Git tag and commit using Go linker flags, then publish checksums and build
 provenance.
 
+## Code signing
+
+The Windows sidecar is covered by the repository's
+[code-signing policy](CODE_SIGNING_POLICY.md). Checksums, release provenance,
+and the server-signed update manifest remain separate layers of verification;
+they do not replace Windows Authenticode signing.
+
 ## License
 
 GAnet is licensed under the MIT License. See [LICENSE](LICENSE) and
