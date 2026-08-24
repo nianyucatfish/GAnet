@@ -1,7 +1,9 @@
 # GAnet code-signing policy
 
-Official Windows releases use SignPath.io free code signing provided by
-[SignPath Foundation](https://signpath.org/).
+GAnet intends to use SignPath.io free code signing provided by
+[SignPath Foundation](https://signpath.org/) for official Windows releases.
+Until that enrollment is approved and the workflow verifies an Authenticode
+signature, a release must be described as unsigned.
 
 ## Scope
 
