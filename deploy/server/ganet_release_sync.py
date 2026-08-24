@@ -95,10 +95,14 @@ def _canonical(value: Any) -> bytes:
 def _sign(signed: dict[str, Any]) -> str:
     if not KEY_PATH.is_file() or KEY_PATH.stat().st_mode & 0o077:
         raise RuntimeError("sidecar signing key is missing or too broadly accessible")
-    completed = subprocess.run(
-        ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(KEY_PATH)],
-        input=_canonical(signed), capture_output=True, timeout=15,
-    )
+    with tempfile.TemporaryDirectory(prefix="ganet-sign-") as temporary_value:
+        payload = Path(temporary_value) / "manifest.bin"
+        payload.write_bytes(_canonical(signed))
+        completed = subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(KEY_PATH),
+             "-in", str(payload)],
+            capture_output=True, timeout=15,
+        )
     if completed.returncode:
         raise RuntimeError("sidecar manifest signing failed")
     return base64.b64encode(completed.stdout).decode("ascii")
