@@ -19,6 +19,7 @@ from . import tools
 
 _BINDING_VERSION = 1
 _LAUNCHER_NAME = "atomic-bridge.cmd" if os.name == "nt" else "atomic-bridge"
+_PYTHON_SHIM_NAME = "ga_python.cmd" if os.name == "nt" else "ga_python.sh"
 _REQUIRED_FILES = (
     "ga.py",
     "agent_loop.py",
@@ -55,6 +56,11 @@ def _binding_record() -> dict[str, Any] | None:
 
 def launcher_path() -> Path:
     return Path(state._RECEIPT_DIR) / _LAUNCHER_NAME
+
+
+def python_shim_path() -> Path:
+    """Where ganet.cmd reads the bound GenericAgent Python from."""
+    return Path(state._RECEIPT_DIR) / _PYTHON_SHIM_NAME
 
 
 def package_root() -> Path:
@@ -244,11 +250,39 @@ def _write_launcher(root: Path, python: Path) -> Path:
     return launcher
 
 
+def _write_python_shim(python: Path) -> Path:
+    shim = python_shim_path()
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        # cmd.exe parses batch files in the OEM code page, so a non-ASCII
+        # interpreter path must be written the same way for `call` to work.
+        content, encoding = f'@set "GANET_PYTHON={python}"\r\n', "oem"
+    else:
+        content, encoding = f"GANET_PYTHON={shlex.quote(str(python))}\n", "utf-8"
+    temporary = shim.with_suffix(shim.suffix + ".tmp")
+    temporary.write_text(content, encoding=encoding, newline="")
+    if os.name != "nt":
+        os.chmod(temporary, 0o700)
+    os.replace(temporary, shim)
+    return shim
+
+
 def refresh_launcher() -> Path | None:
     status = inspect_binding()
     if not status.get("ok"):
         return None
+    _write_python_shim(_resolved(status["gaPython"]))
     return _write_launcher(_resolved(status["gaRoot"]), _resolved(status["gaPython"]))
+
+
+def _restore_file(path: Path, data: bytes | None) -> None:
+    if data is None:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
 
 
 def _check_launcher(launcher: Path, root: Path, python: Path,
@@ -289,23 +323,20 @@ def configure_host(ga_root: str | os.PathLike[str], ga_python: str | os.PathLike
     if not result.get("ok"):
         raise RuntimeError(str(result.get("error") or "设备访问环境验证失败"))
 
-    launcher = launcher_path()
+    launcher, shim = launcher_path(), python_shim_path()
     previous_launcher = launcher.read_bytes() if launcher.is_file() else None
+    previous_shim = shim.read_bytes() if shim.is_file() else None
     try:
         _write_launcher(root, python)
+        _write_python_shim(python)
         verified = _check_launcher(launcher, root, python, timeout)
         if not verified.get("ok"):
             raise RuntimeError(str(verified.get("error") or "设备访问入口验证失败"))
         record = {"version": _BINDING_VERSION, "ga_root": str(root), "ga_python": str(python)}
         state.save_config(host_binding=record)
     except Exception:
-        if previous_launcher is None:
-            with contextlib.suppress(OSError):
-                launcher.unlink()
-        else:
-            temporary = launcher.with_suffix(launcher.suffix + ".tmp")
-            temporary.write_bytes(previous_launcher)
-            os.replace(temporary, launcher)
+        _restore_file(launcher, previous_launcher)
+        _restore_file(shim, previous_shim)
         raise
     return verified
 

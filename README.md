@@ -6,9 +6,10 @@ computer atomic tools is an explicit, validated host binding rather than an
 installation inside the GenericAgent source tree.
 
 > Current status: standalone component and audited release pipeline baseline.
-> Windows is the only supported desktop platform in this first pass. Tagged
-> GitHub Releases publish the component and sidecar; the final end-user download
-> disclaimer is still being prepared.
+> Windows is the only supported desktop platform in this first pass. The Python
+> component is distributed as source from this repository via git; tagged GitHub
+> Releases publish the sidecar binary and its verification metadata. The final
+> end-user download disclaimer is still being prepared.
 
 ## Repository layout
 
@@ -28,26 +29,29 @@ python -m venv .venv
 .venv\Scripts\python -m ganet
 ```
 
-The published GAnet component will include its own runtime under `runtime/`,
-so normal use will not require PATH, `PYTHONPATH`, `GANET_HOME`, or the Python
-interpreter bound for GenericAgent tools. `ganet.cmd` resolves paths relative
-to its own location and can therefore be launched from an unrelated working
-directory.
+An installed component is a git clone of this repository. It runs under the
+GenericAgent Python recorded by `configure-host`: the lightweight dependencies
+(`cryptography`, `Pillow`, `qrcode`) are installed into that interpreter, and
+`ganet.cmd` reads the bound interpreter from
+`~/.genericagent/ganet/ga_python.cmd`, so it can be double-clicked from any
+working directory without a PATH or `PYTHONPATH` setup. Updates are `git pull`,
+which also lets users merge their own local changes.
 
-The component exposes a machine-readable identity check:
+The component exposes a machine-readable identity check, run with any Python
+from the checkout root:
 
 ```text
-ganet.cmd inspect-component --json
+python -m ganet inspect-component --json
 ```
 
-A successful bundled inspection verifies the launcher, bundled Python, Python
-package layout, version, and current component root. `configure-host` and a
-normal user-center launch atomically refresh the non-secret discovery record at
+A successful inspection verifies the launcher, source package layout, version,
+and current component root. `configure-host` and a normal user-center launch
+atomically refresh the non-secret discovery record at
 `~/.genericagent/ganet/component.json`. GenericAgent can use that record to find
 a previously installed or moved component, but must still call the identity
 check before trusting the recorded path. New installations default to
 `%LOCALAPPDATA%\GenericAgent\GAnet\Component\` on Windows; the component remains
-movable, and starting `ganet.cmd` from its new location refreshes the record.
+movable, and starting it from its new location refreshes the record.
 
 ## State and trust boundaries
 

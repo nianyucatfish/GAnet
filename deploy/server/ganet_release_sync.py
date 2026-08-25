@@ -26,7 +26,6 @@ KEY_PATH = Path("/opt/ga-ops/secrets/ganet-sidecar-release-ed25519.pem")
 STATE_PATH = Path("/var/lib/ganet-release-sync/state.json")
 SOURCE_ROOT = Path("/opt/ganet-release-sync/source")
 MAX_SIDECAR_BYTES = 128 * 1024 * 1024
-MAX_COMPONENT_BYTES = 512 * 1024 * 1024
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
@@ -205,9 +204,8 @@ def sync(tag: str | None = None) -> dict[str, Any]:
         raise RuntimeError("GitHub release contains duplicate asset names")
     by_name = {str(item.get("name")): item for item in assets if isinstance(item, dict)}
     sidecar_name = f"ganet-sidecar-windows-amd64-{version_text}.exe"
-    component_name = f"GAnet-Windows-amd64-{version_text}.zip"
     identity_name = "sidecar-version.json"
-    required = (sidecar_name, component_name, identity_name, "SHA256SUMS.txt", "provenance.json")
+    required = (sidecar_name, identity_name, "SHA256SUMS.txt", "provenance.json")
     if any(name not in by_name for name in required):
         raise RuntimeError("GitHub release is missing required GAnet assets")
 
@@ -215,9 +213,8 @@ def sync(tag: str | None = None) -> dict[str, Any]:
         temporary = Path(temporary_value)
         downloaded: dict[str, tuple[Path, str, int]] = {}
         for name in required:
-            limit = MAX_COMPONENT_BYTES if name.endswith(".zip") else MAX_SIDECAR_BYTES
             path = temporary / name
-            digest, size = _download(str(by_name[name]["browser_download_url"]), path, limit)
+            digest, size = _download(str(by_name[name]["browser_download_url"]), path, MAX_SIDECAR_BYTES)
             expected_size = int(by_name[name].get("size") or -1)
             if expected_size <= 0 or size != expected_size:
                 raise RuntimeError(f"GitHub asset size mismatch: {name}")
@@ -231,9 +228,9 @@ def sync(tag: str | None = None) -> dict[str, Any]:
                 if name in checksums:
                     raise RuntimeError(f"duplicate GitHub checksum entry: {name}")
                 checksums[name] = digest
-        if set(checksums) != {sidecar_name, component_name, identity_name}:
+        if set(checksums) != {sidecar_name, identity_name}:
             raise RuntimeError("GitHub checksum file contains an unexpected artifact set")
-        for name in (sidecar_name, component_name, identity_name):
+        for name in (sidecar_name, identity_name):
             if checksums.get(name) != downloaded[name][1]:
                 raise RuntimeError(f"GitHub checksum mismatch: {name}")
 
@@ -242,7 +239,7 @@ def sync(tag: str | None = None) -> dict[str, Any]:
         provenance_artifacts = provenance.get("artifacts")
         if provenance.get("repository") != REPOSITORY or provenance.get("version") != version_text or \
                 not COMMIT.fullmatch(commit) or not isinstance(provenance_artifacts, list) or \
-                sorted(provenance_artifacts) != sorted((sidecar_name, component_name, identity_name)):
+                sorted(provenance_artifacts) != sorted((sidecar_name, identity_name)):
             raise RuntimeError("release provenance identity is invalid")
         identity = json.loads(downloaded[identity_name][0].read_text(encoding="utf-8-sig"))
         if identity != {"version": version_text, "commit": commit, "protocolVersion": "1"}:

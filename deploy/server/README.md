@@ -9,8 +9,9 @@ The synchronizer accepts only published releases that are neither drafts nor
 prereleases. It verifies the release tag, provenance commit, GitHub asset sizes,
 and `SHA256SUMS.txt`, rejects version downgrades, checks out the exact release
 commit, then atomically publishes the sidecar, signed manifest, and state. The
-full GAnet component remains a GitHub Release asset. The synchronizer never
-prints or copies the signing key.
+GAnet Python component is distributed as source from the GitHub repository via
+git; releases carry only the sidecar binary and its verification metadata. The
+synchronizer never prints or copies the signing key.
 
 Expected server paths:
 

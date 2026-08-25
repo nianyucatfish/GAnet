@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -85,6 +86,9 @@ def test_configure_host_validates_and_records_explicit_runtime(
     launcher = host_adapter.launcher_path()
     assert launcher.is_file()
     assert str(Path(__file__).resolve().parents[1] / "ganet" / "host_entry.py") in launcher.read_text(encoding="utf-8")
+    shim = host_adapter.python_shim_path()
+    encoding = "oem" if os.name == "nt" else "utf-8"
+    assert str(Path(sys.executable).resolve()) in shim.read_text(encoding=encoding)
 
 
 def test_configure_host_is_idempotent_for_the_same_binding(
@@ -135,7 +139,9 @@ def test_failed_repair_preserves_binding_and_launcher(
     _write_fake_ga(second)
     host_adapter.configure_host(first, sys.executable)
     launcher = host_adapter.launcher_path()
+    shim = host_adapter.python_shim_path()
     before = launcher.read_bytes()
+    shim_before = shim.read_bytes()
     monkeypatch.setattr(
         host_adapter,
         "_check_launcher",
@@ -147,6 +153,7 @@ def test_failed_repair_preserves_binding_and_launcher(
 
     assert network.load_config()["host_binding"]["ga_root"] == str(first.resolve())
     assert launcher.read_bytes() == before
+    assert shim.read_bytes() == shim_before
 
 
 def test_refresh_launcher_tracks_component_location_without_rebinding(

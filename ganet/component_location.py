@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -32,45 +31,35 @@ def _resolved(value: str | os.PathLike[str]) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def inspect_component(
-    root: str | os.PathLike[str] | None = None,
-    python_executable: str | os.PathLike[str] | None = None,
-) -> dict[str, Any]:
+def inspect_component(root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Validate the git-source component layout at ``root``.
+
+    The official component is a git checkout of the GAnet repository running
+    under the bound GenericAgent Python; there is no bundled runtime.
+    """
     component_root = _resolved(root or paths.package_root())
     launcher = component_root / "ganet.cmd"
-    bundled_python = component_root / "runtime" / "python" / "python.exe"
-    bundled_package = component_root / "runtime" / "site-packages" / "ganet" / "__init__.py"
-    source_package = component_root / "ganet" / "__init__.py"
-    bundled = bundled_python.is_file() and bundled_package.is_file()
-    development = (component_root / "pyproject.toml").is_file() and source_package.is_file()
-    missing = []
-    if not launcher.is_file():
-        missing.append("ganet.cmd")
-    if not bundled and not development:
-        missing.extend(("runtime/python/python.exe", "runtime/site-packages/ganet/__init__.py"))
-    expected_python = bundled_python if bundled else _resolved(python_executable or sys.executable)
+    required = {
+        "ganet.cmd": launcher,
+        "pyproject.toml": component_root / "pyproject.toml",
+        "ganet/__init__.py": component_root / "ganet" / "__init__.py",
+    }
+    missing = [name for name, path in required.items() if not path.is_file()]
     result: dict[str, Any] = {
         "ok": not missing,
         "schema": _SCHEMA_VERSION,
         "version": __version__,
         "packageRoot": str(component_root),
         "launcher": str(launcher),
-        "pythonExecutable": str(expected_python),
-        "layout": "bundled" if bundled else "source",
+        "layout": "source",
+        "git": (component_root / ".git").exists(),
         "defaultInstallRoot": str(default_install_root().resolve()),
     }
     if missing:
         result["status"] = "incomplete"
         result["missing"] = missing
-        return result
-
-    actual_python = _resolved(python_executable or sys.executable)
-    if bundled and os.path.normcase(str(actual_python)) != os.path.normcase(str(bundled_python.resolve())):
-        result["ok"] = False
-        result["status"] = "wrong_runtime"
-        result["error"] = "GAnet 未使用组件自带 Python 运行"
-        return result
-    result["status"] = "ready"
+    else:
+        result["status"] = "ready"
     return result
 
 
@@ -85,8 +74,8 @@ def load_location() -> dict[str, Any] | None:
 
 
 def record_component(result: dict[str, Any]) -> Path:
-    if result.get("ok") is not True or result.get("layout") != "bundled":
-        raise ValueError("只能登记完整的正式 GAnet 组件")
+    if result.get("ok") is not True or result.get("layout") != "source":
+        raise ValueError("只能登记完整的 GAnet 组件")
     record = {
         "schema": _SCHEMA_VERSION,
         "package_root": result["packageRoot"],
@@ -116,6 +105,6 @@ def record_component(result: dict[str, Any]) -> Path:
 
 def refresh_location() -> dict[str, Any]:
     result = inspect_component()
-    if result.get("ok") and result.get("layout") == "bundled":
+    if result.get("ok"):
         record_component(result)
     return result

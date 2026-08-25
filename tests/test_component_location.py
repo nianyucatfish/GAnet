@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,17 +10,15 @@ import pytest
 
 from ganet import component_location, paths
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _write_component(root: Path) -> Path:
-    (root / "runtime" / "python").mkdir(parents=True)
-    (root / "runtime" / "site-packages" / "ganet").mkdir(parents=True)
+    (root / "ganet").mkdir(parents=True)
     (root / "ganet.cmd").write_text("@echo off\n", encoding="utf-8")
-    python = root / "runtime" / "python" / "python.exe"
-    python.write_bytes(b"python")
-    (root / "runtime" / "site-packages" / "ganet" / "__init__.py").write_text(
-        "", encoding="utf-8"
-    )
-    return python
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+    (root / "ganet" / "__init__.py").write_text("", encoding="utf-8")
+    return root
 
 
 @pytest.fixture
@@ -32,38 +29,30 @@ def isolated_location(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return location
 
 
-def test_inspect_bundled_component_reports_stable_identity(
+def test_inspect_source_component_reports_stable_identity(
     tmp_path: Path, isolated_location: Path
 ) -> None:
-    root = tmp_path / "Component"
-    python = _write_component(root)
+    root = _write_component(tmp_path / "Component")
 
-    result = component_location.inspect_component(root, python)
+    result = component_location.inspect_component(root)
 
     assert result["ok"] is True
     assert result["status"] == "ready"
-    assert result["layout"] == "bundled"
+    assert result["layout"] == "source"
+    assert result["git"] is False
     assert Path(result["packageRoot"]) == root.resolve()
     assert Path(result["launcher"]) == (root / "ganet.cmd").resolve()
-    assert Path(result["pythonExecutable"]) == python.resolve()
     assert not isolated_location.exists()
 
 
-def test_source_refresh_does_not_register_development_tree(
-    tmp_path: Path, isolated_location: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "source"
-    (root / "ganet").mkdir(parents=True)
-    (root / "ganet.cmd").write_text("@echo off\n", encoding="utf-8")
-    (root / "pyproject.toml").write_text("", encoding="utf-8")
-    (root / "ganet" / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setattr(paths, "package_root", lambda: root)
+def test_inspect_reports_git_checkout(tmp_path: Path) -> None:
+    root = _write_component(tmp_path / "Component")
+    (root / ".git").mkdir()
 
-    result = component_location.refresh_location()
+    result = component_location.inspect_component(root)
 
     assert result["ok"] is True
-    assert result["layout"] == "source"
-    assert not isolated_location.exists()
+    assert result["git"] is True
 
 
 def test_inspect_rejects_incomplete_component(tmp_path: Path) -> None:
@@ -71,30 +60,19 @@ def test_inspect_rejects_incomplete_component(tmp_path: Path) -> None:
     root.mkdir()
     (root / "ganet.cmd").write_text("", encoding="utf-8")
 
-    result = component_location.inspect_component(root, sys.executable)
+    result = component_location.inspect_component(root)
 
     assert result["ok"] is False
     assert result["status"] == "incomplete"
-    assert "runtime/python/python.exe" in result["missing"]
-
-
-def test_bundled_component_rejects_other_python(tmp_path: Path) -> None:
-    root = tmp_path / "Component"
-    _write_component(root)
-
-    result = component_location.inspect_component(root, sys.executable)
-
-    assert result["ok"] is False
-    assert result["status"] == "wrong_runtime"
+    assert "pyproject.toml" in result["missing"]
+    assert "ganet/__init__.py" in result["missing"]
 
 
 def test_refresh_records_current_location_atomically(
     tmp_path: Path, isolated_location: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "Component"
-    python = _write_component(root)
+    root = _write_component(tmp_path / "Component")
     monkeypatch.setattr(paths, "package_root", lambda: root)
-    monkeypatch.setattr(component_location.sys, "executable", str(python))
 
     result = component_location.refresh_location()
 
@@ -110,16 +88,12 @@ def test_refresh_records_current_location_atomically(
 def test_moved_component_refreshes_location_without_old_path(
     tmp_path: Path, isolated_location: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    first_python = _write_component(first)
-    second_python = _write_component(second)
+    first = _write_component(tmp_path / "first")
+    second = _write_component(tmp_path / "second")
     monkeypatch.setattr(paths, "package_root", lambda: first)
-    monkeypatch.setattr(component_location.sys, "executable", str(first_python))
     component_location.refresh_location()
 
     monkeypatch.setattr(paths, "package_root", lambda: second)
-    monkeypatch.setattr(component_location.sys, "executable", str(second_python))
     component_location.refresh_location()
 
     record = component_location.load_location()
@@ -130,10 +104,8 @@ def test_moved_component_refreshes_location_without_old_path(
 def test_invalid_component_does_not_replace_last_location(
     tmp_path: Path, isolated_location: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    valid = tmp_path / "valid"
-    python = _write_component(valid)
+    valid = _write_component(tmp_path / "valid")
     monkeypatch.setattr(paths, "package_root", lambda: valid)
-    monkeypatch.setattr(component_location.sys, "executable", str(python))
     component_location.refresh_location()
     before = isolated_location.read_bytes()
     broken = tmp_path / "broken"
@@ -146,17 +118,10 @@ def test_invalid_component_does_not_replace_last_location(
     assert isolated_location.read_bytes() == before
 
 
-def test_package_root_detects_bundled_layout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "Component"
-    package_file = root / "runtime" / "site-packages" / "ganet" / "paths.py"
-    package_file.parent.mkdir(parents=True)
-    package_file.write_text("", encoding="utf-8")
+def test_package_root_is_the_checkout_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GANET_ROOT", raising=False)
-    monkeypatch.setattr(paths, "__file__", str(package_file))
 
-    assert paths.package_root() == root.resolve()
+    assert paths.package_root() == _REPO_ROOT
 
 
 def test_package_root_prefers_launcher_environment(
@@ -168,21 +133,59 @@ def test_package_root_prefers_launcher_environment(
     assert paths.package_root() == root.resolve()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="ganet.cmd is a Windows launcher")
-def test_launcher_requires_bundled_runtime(tmp_path: Path) -> None:
-    source = Path(__file__).resolve().parents[1] / "ganet.cmd"
-    launcher = tmp_path / "component" / "ganet.cmd"
-    launcher.parent.mkdir()
-    shutil.copyfile(source, launcher)
-
-    completed = subprocess.run(
-        [str(launcher), "inspect-component", "--json"],
-        cwd=tmp_path,
+def _run_launcher(home: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    environment = {**os.environ, "USERPROFILE": str(home)}
+    environment.pop("GANET_PYTHON", None)
+    environment.pop("PYTHONPATH", None)
+    return subprocess.run(
+        [str(_REPO_ROOT / "ganet.cmd"), *arguments],
+        cwd=home,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ganet.cmd is a Windows launcher")
+def test_launcher_requires_host_binding(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    completed = _run_launcher(home, "inspect-component", "--json")
 
     assert completed.returncode == 1
     assert completed.stdout == ""
-    assert "component runtime is missing" in completed.stderr
+    assert "host binding is missing" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ganet.cmd is a Windows launcher")
+def test_launcher_rejects_stale_bound_python(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    shim = home / ".genericagent" / "ganet" / "ga_python.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text(
+        f'@set "GANET_PYTHON={tmp_path / "gone" / "python.exe"}"\r\n', encoding="ascii"
+    )
+
+    completed = _run_launcher(home, "inspect-component", "--json")
+
+    assert completed.returncode == 1
+    assert "no longer exists" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ganet.cmd is a Windows launcher")
+def test_launcher_runs_ganet_under_bound_python(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    shim = home / ".genericagent" / "ganet" / "ga_python.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text(f'@set "GANET_PYTHON={sys.executable}"\r\n', encoding="ascii")
+
+    completed = _run_launcher(home, "inspect-component", "--json")
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["ok"] is True
+    assert result["layout"] == "source"
+    assert Path(result["packageRoot"]) == _REPO_ROOT
