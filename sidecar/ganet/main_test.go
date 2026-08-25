@@ -2,9 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
-	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,38 +78,5 @@ func TestStatusJSONCarriesBuildIdentity(t *testing.T) {
 	if decoded["version"] != version || decoded["commit"] != commit ||
 		decoded["protocolVersion"] != protocolVersion {
 		t.Fatalf("unexpected build status: %s", value)
-	}
-}
-
-func TestProxyForwardsBothDirections(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	port := listener.Addr().(*net.TCPAddr).Port
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-		buffer := make([]byte, 4)
-		_, _ = conn.Read(buffer)
-		_, _ = conn.Write([]byte("pong"))
-	}()
-	remote, peer := net.Pipe()
-	defer peer.Close()
-	go proxy(remote, port, log.New(io.Discard, "", 0))
-	_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := peer.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	buffer := make([]byte, 4)
-	if _, err := peer.Read(buffer); err != nil {
-		t.Fatal(err)
-	}
-	if string(buffer) != "pong" {
-		t.Fatalf("got %q", buffer)
 	}
 }

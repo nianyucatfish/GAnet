@@ -248,8 +248,8 @@ def fingerprint(public_key: str) -> str:
 
 
 def authorized_keys_path() -> Path:
-    """GAnet-owned key file, separate from the user's normal SSH authorization."""
-    return Path.home() / ".ssh" / "authorized_keys_ganet"
+    """GAnet-owned key file; the embedded SSH service reads exactly this path."""
+    return Path.home() / ".genericagent" / "ganet" / "authorized_keys"
 
 
 def _windows_acl_script(path: Path, *, verify: bool) -> str:
@@ -340,7 +340,7 @@ def _paired_devices() -> dict[str, Any]:
 def list_paired_devices() -> list[dict[str, Any]]:
     """Return paired records enriched with their current SSH authorization fact.
 
-    A pairing record alone is not proof that sshd will still accept that phone.
+    A pairing record alone is not proof the embedded SSH service still accepts that phone.
     Compare each recorded key with the GAnet-owned authorization file instead of
     exposing the never-updated ``last_seen`` field as a connection status.
     """
@@ -762,7 +762,6 @@ def _report_with_ssh_probe(report: dict, probe: dict) -> dict:
 
 def configure_environment(*, approved: bool = False,
                           tailscale_installed_by_ganet: bool = False,
-                          sshd_installed_by_ganet: bool = False,
                           network_switch_approved: bool = False) -> dict:
     """Plan or apply the standard PC setup, then return the authoritative doctor state."""
     if tailscale_installed_by_ganet:
@@ -779,8 +778,9 @@ def configure_environment(*, approved: bool = False,
                 return {"status": "blocked", "changed": False, "stage": "local_state",
                         "environment": report,
                         "message": f"GAnet 已连接，但无法完成本机状态保存：{exc}"}
-        # Static checks alone cannot prove that sshd reads the intended key file.
-        # Finish every GA-directed setup run with a disposable public-key request.
+        # Static checks alone cannot prove the embedded SSH service accepts the
+        # managed key file. Finish every GA-directed setup run with a disposable
+        # public-key request.
         probe = probe_phone_ssh()
         report = _report_with_ssh_probe(report, probe)
         return {"status": report["status"], "changed": False, "environment": report,
@@ -791,7 +791,6 @@ def configure_environment(*, approved: bool = False,
     ) if not report["checks"].get(key, False)]
     missing_system_components = [label for key, label in (
         ("network_provider", "GAnet 网络组件"),
-        ("sshd_installed", "OpenSSH Server"),
     ) if not report["checks"].get(key, False)]
     if missing_project_components:
         return {"status": "needs_project_setup", "changed": False, "environment": report,
@@ -809,15 +808,13 @@ def configure_environment(*, approved: bool = False,
             report = env.check_env()
             missing_system_components = [label for key, label in (
                 ("network_provider", "GAnet 网络组件"),
-                ("sshd_installed", "OpenSSH Server"),
             ) if not report["checks"].get(key, False)]
         except RuntimeError as exc:
             return {"status": "blocked", "changed": False, "stage": "network_component",
                     "environment": env.check_env(), "message": str(exc)}
-    configuration_checks = ["sshd_service", "ssh_port", "sftp_subsystem",
-                            "managed_keys", "managed_keys_acl", "listening"]
-    if report.get("provider") != "embedded-tsnet":
-        configuration_checks.append("firewall")
+    # SSH service state (running/listening) follows enrollment, which happens
+    # below; configuration here only covers the user-owned local facts.
+    configuration_checks = ["managed_keys", "managed_keys_acl", "host_key"]
     needs_ganet_configuration = any(not report["checks"].get(key, False)
                                     for key in configuration_checks)
     if component_required and not approved:
@@ -847,10 +844,9 @@ def configure_environment(*, approved: bool = False,
                 "message": "这台电脑当前连接着另一个 Tailscale 网络；继续会将它切换到 GAnet"}
     if needs_ganet_configuration and not approved:
         return {"status": "needs_approval", "changed": False, "environment": report,
-                "message": "需要配置 GAnet SSH 或防火墙"}
+                "message": "需要配置 GAnet 内嵌 SSH 环境"}
     if needs_ganet_configuration:
-        setup = network.apply_confirmed(
-            int(report["ssh_port"]), sshd_installed_by_ganet=sshd_installed_by_ganet)
+        setup = network.apply_confirmed(int(report["ssh_port"]))
         if not setup.get("ok"):
             return {"status": "blocked", "changed": False, "environment": env.check_env(),
                     "stage": setup.get("phase"), "code": setup.get("code"),

@@ -34,15 +34,18 @@ var (
 const controlAddr = "127.0.0.1:48223"
 
 type runtimeState struct {
-	mu        sync.RWMutex
-	server    *tsnet.Server
-	ip        string
-	online    bool
-	listening bool
-	startedAt time.Time
-	lastError string
-	controlOK bool
-	enrolled  bool
+	mu             sync.RWMutex
+	server         *tsnet.Server
+	ip             string
+	online         bool
+	listening      bool
+	loopback       bool
+	hostKey        string
+	authorizedKeys bool
+	startedAt      time.Time
+	lastError      string
+	controlOK      bool
+	enrolled       bool
 }
 
 type status struct {
@@ -54,6 +57,9 @@ type status struct {
 	Enrolled        bool   `json:"enrolled"`
 	Online          bool   `json:"online"`
 	Listening       bool   `json:"listening"`
+	LoopbackSSH     bool   `json:"loopbackSsh"`
+	SSHHostKey      string `json:"sshHostKey,omitempty"`
+	AuthorizedKeys  bool   `json:"authorizedKeys"`
 	ControlMatch    bool   `json:"controlMatch"`
 	IP              string `json:"ip,omitempty"`
 	SSHPort         int    `json:"sshPort"`
@@ -212,15 +218,23 @@ func run(controlURL, hostname, authKey string, sshPort int) error {
 	}
 	defer control.Close()
 
-	st := &runtimeState{startedAt: time.Now()}
+	service, err := newSSHService(logger)
+	if err != nil {
+		return err
+	}
+
+	st := &runtimeState{startedAt: time.Now(), hostKey: service.hostPublicKey()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		st.refresh(controlURL)
+		keys, keysErr := loadAuthorizedKeys()
 		st.mu.RLock()
 		result := status{Version: version, Commit: commit, ProtocolVersion: protocolVersion,
 			Installed: true, Running: true, Enrolled: st.enrolled,
 			Online: st.online, Listening: st.listening, ControlMatch: st.controlOK,
-			IP: st.ip, SSHPort: sshPort, PID: os.Getpid(), ErrorCategory: st.lastError}
+			LoopbackSSH: st.loopback, SSHHostKey: st.hostKey,
+			AuthorizedKeys: keysErr == nil && len(keys) > 0,
+			IP:             st.ip, SSHPort: sshPort, PID: os.Getpid(), ErrorCategory: st.lastError}
 		st.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(result)
@@ -238,6 +252,27 @@ func run(controlURL, hostname, authKey string, sshPort int) error {
 		close(stopping)
 	}()
 
+	// Local processes (the configuration probe) reach the same SSH service via
+	// loopback; tsnet listeners are invisible to them because the tailnet
+	// address lives only inside this process.
+	loopback, loopbackErr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(sshPort)))
+	if loopbackErr != nil {
+		logger.Printf("loopback_listen_failed port=%d type=%T", sshPort, loopbackErr)
+		st.mu.Lock()
+		st.lastError = "loopback_listen"
+		st.mu.Unlock()
+	} else {
+		st.mu.Lock()
+		st.loopback = true
+		st.mu.Unlock()
+		logger.Printf("ssh_listening origin=loopback port=%d", sshPort)
+		go func() {
+			<-stopping
+			_ = loopback.Close()
+		}()
+		go service.serve(loopback, "loopback", stopping)
+	}
+
 	for attempt := 0; ; attempt++ {
 		select {
 		case <-stopping:
@@ -248,7 +283,7 @@ func run(controlURL, hostname, authKey string, sshPort int) error {
 			AuthKey: authKey, Ephemeral: false}
 		st.setServer(s)
 		authKey = "" // a single-use enrollment grant must never be replayed on retry
-		err := serveNetwork(s, st, controlURL, sshPort, logger, stopping)
+		err := serveNetwork(s, st, controlURL, sshPort, service, logger, stopping)
 		s.Close()
 		st.setServer(nil)
 		select {
@@ -279,7 +314,7 @@ func reconnectDelay(attempt int) time.Duration {
 }
 
 func serveNetwork(s *tsnet.Server, st *runtimeState, controlURL string, sshPort int,
-	logger *log.Logger, stopping <-chan struct{}) error {
+	service *sshService, logger *log.Logger, stopping <-chan struct{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	up, err := s.Up(ctx)
 	cancel()
@@ -309,7 +344,7 @@ func serveNetwork(s *tsnet.Server, st *runtimeState, controlURL string, sshPort 
 	st.mu.Lock()
 	st.listening = true
 	st.mu.Unlock()
-	logger.Printf("forward_listening port=%d", sshPort)
+	logger.Printf("ssh_listening origin=tailnet port=%d", sshPort)
 	go func() {
 		<-stopping
 		_ = listener.Close()
@@ -318,7 +353,7 @@ func serveNetwork(s *tsnet.Server, st *runtimeState, controlURL string, sshPort 
 		conn, err := listener.Accept()
 		if err == nil {
 			failures = 0
-			go proxy(conn, sshPort, logger)
+			go service.handleConn(conn, "tailnet")
 			continue
 		}
 		select {
@@ -395,23 +430,9 @@ func (st *runtimeState) refresh(expectedControlURL string) {
 	}
 }
 
-func proxy(remote net.Conn, sshPort int, logger *log.Logger) {
-	defer remote.Close()
-	local, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(sshPort)), 10*time.Second)
-	if err != nil {
-		logger.Printf("ssh_dial_failed type=%T", err)
-		return
-	}
-	defer local.Close()
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(local, remote); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(remote, local); done <- struct{}{} }()
-	<-done
-}
-
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ganet-sidecar <run|status|version|autostart>")
+		fmt.Fprintln(os.Stderr, "usage: ganet-sidecar <run|status|version|host-key|autostart>")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -419,6 +440,15 @@ func main() {
 		writeJSON(buildIdentity())
 	case "status":
 		writeJSON(queryStatus())
+	case "host-key":
+		// Setup needs the host public key before the sidecar's first run: the
+		// enrollment request already carries it for phone-side pinning.
+		signer, err := loadOrCreateHostKey()
+		if err != nil {
+			writeJSON(map[string]any{"ok": false, "error": err.Error()})
+			os.Exit(1)
+		}
+		writeJSON(map[string]any{"ok": true, "hostKey": hostPublicKeyLine(signer)})
 	case "autostart":
 		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr, "usage: ganet-sidecar autostart install|remove")
@@ -433,7 +463,7 @@ func main() {
 		flags := flag.NewFlagSet("run", flag.ExitOnError)
 		controlURL := flags.String("control-url", os.Getenv("GANET_CONTROL_URL"), "Headscale control URL")
 		hostname := flags.String("hostname", os.Getenv("GANET_HOSTNAME"), "stable node hostname")
-		sshPort := flags.Int("ssh-port", 0, "local OpenSSH port")
+		sshPort := flags.Int("ssh-port", 0, "embedded SSH listen port")
 		authStdin := flags.Bool("auth-key-stdin", false, "read one-time enrollment grant from stdin")
 		_ = flags.Parse(os.Args[2:])
 		authKey := ""
