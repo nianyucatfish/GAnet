@@ -9,8 +9,9 @@ signature, a release must be described as unsigned.
 
 Official Windows GAnet releases are built only by the public GitHub Actions
 workflow in this repository. The Windows sidecar is the executable covered by
-this policy. The component archive contains the same signed sidecar and the
-bundled Python runtime obtained from python-build-standalone.
+this policy and the only binary a release publishes. The Python component is
+distributed as source from this repository via git and ships no executable of
+its own.
 
 ## Source and build integrity
 
