@@ -186,6 +186,7 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     tag_name = str(release.get("tag_name") or "")
     version = _version(tag_name)
     version_text = ".".join(str(part) for part in version)
+    sidecar_name = f"ganet-sidecar-windows-amd64-{version_text}.exe"
     state = _load_json(STATE_PATH)
     known_versions = [
         str(entry["version"]) for entry in _existing_releases()
@@ -196,6 +197,20 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     if version < _version(current):
         raise RuntimeError(f"release downgrade rejected: {version_text} < {current}")
 
+    # A release that was already mirrored is a no-op: this also keeps releases
+    # published under the retired asset rules (component ZIP) served without
+    # revalidating them. A damaged mirror or manifest falls through to a full
+    # sync, which then applies the current asset rules.
+    if state.get("release_id") == release.get("id") and \
+            str(state.get("version") or "") == version_text:
+        mirrored = SIDECAR_ROOT / sidecar_name
+        entry = next((item for item in _existing_releases()
+                      if str(item.get("version")) == version_text), None)
+        if entry and mirrored.is_file() and \
+                hashlib.sha256(mirrored.read_bytes()).hexdigest() == str(entry.get("sha256")):
+            return {"ok": True, "changed": False, "version": version_text,
+                    "reason": "release already mirrored"}
+
     assets = release.get("assets")
     if not isinstance(assets, list):
         raise RuntimeError("GitHub release has no assets")
@@ -203,7 +218,6 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     if len(asset_names) != len(set(asset_names)):
         raise RuntimeError("GitHub release contains duplicate asset names")
     by_name = {str(item.get("name")): item for item in assets if isinstance(item, dict)}
-    sidecar_name = f"ganet-sidecar-windows-amd64-{version_text}.exe"
     identity_name = "sidecar-version.json"
     required = (sidecar_name, identity_name, "SHA256SUMS.txt", "provenance.json")
     if any(name not in by_name for name in required):

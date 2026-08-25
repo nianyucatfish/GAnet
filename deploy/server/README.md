@@ -23,5 +23,6 @@ Expected server paths:
 
 `ganet-release-sync.service` and `ganet-release-sync.timer` are intended for
 `/etc/systemd/system/`. The service is a restricted root oneshot because the
-existing key is root-only. The timer checks every 15 minutes; reprocessing the
-same release is idempotent.
+existing key is root-only. The timer checks every 15 minutes; a release that
+is already mirrored short-circuits without re-downloading, so releases
+published under earlier asset rules stay served without revalidation.
