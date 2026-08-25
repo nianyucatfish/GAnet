@@ -582,7 +582,7 @@ def check_env() -> dict[str, Any]:
              (checks["ssh_loopback"], "本机回环 SSH 监听未就绪"),
              (checks["listening"], f"本机端口 {port} 未监听"),
          ) if not ok), "")},
-        {"key": "access", "label": "设备访问", "ok": checks["managed_keys"] and checks["managed_keys_acl"]
+        {"key": "access", "label": "安全性检查", "ok": checks["managed_keys"] and checks["managed_keys_acl"]
          and checks["host_key"],
          "detail": next((detail for ok, detail in (
              (checks["managed_keys"], "未创建 GAnet 配对公钥文件"),
