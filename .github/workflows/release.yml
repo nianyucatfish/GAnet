@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check pytest
-          python -m pytest tests/test_host_binding.py sidecar/ganet/network_component_test.py -q
+          python -m pytest tests sidecar/ganet/network_component_test.py -q
 
       - name: Test Go sidecar
         working-directory: sidecar/ganet
@@ -211,9 +211,14 @@ jobs:
           }
           Push-Location $extract
           try {
-            $env:PYTHONPATH = $sitePackages
-            & "$extract/runtime/python/python.exe" -m ganet --help | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Bundled GAnet launcher smoke test failed" }
+            $inspection = & "$extract/ganet.cmd" inspect-component --json | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or -not $inspection.ok -or `
+                $inspection.layout -ne "bundled" -or `
+                $inspection.version -ne $env:VERSION -or `
+                $inspection.packageRoot -ne (Resolve-Path $extract).Path -or `
+                $inspection.pythonExecutable -ne (Resolve-Path "$extract/runtime/python/python.exe").Path) {
+              throw "Bundled GAnet component inspection failed"
+            }
           } finally {
             Pop-Location
           }

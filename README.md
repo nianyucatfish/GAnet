@@ -25,7 +25,7 @@ Python 3.10 or newer is required for local development:
 ```text
 python -m venv .venv
 .venv\Scripts\python -m pip install -e .
-ganet.cmd
+.venv\Scripts\python -m ganet
 ```
 
 The published GAnet component will include its own runtime under `runtime/`,
@@ -33,6 +33,21 @@ so normal use will not require PATH, `PYTHONPATH`, `GANET_HOME`, or the Python
 interpreter bound for GenericAgent tools. `ganet.cmd` resolves paths relative
 to its own location and can therefore be launched from an unrelated working
 directory.
+
+The component exposes a machine-readable identity check:
+
+```text
+ganet.cmd inspect-component --json
+```
+
+A successful bundled inspection verifies the launcher, bundled Python, Python
+package layout, version, and current component root. `configure-host` and a
+normal user-center launch atomically refresh the non-secret discovery record at
+`~/.genericagent/ganet/component.json`. GenericAgent can use that record to find
+a previously installed or moved component, but must still call the identity
+check before trusting the recorded path. New installations default to
+`%LOCALAPPDATA%\GenericAgent\GAnet\Component\` on Windows; the component remains
+movable, and starting `ganet.cmd` from its new location refreshes the record.
 
 ## State and trust boundaries
 
