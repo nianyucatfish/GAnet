@@ -57,29 +57,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
 
-      - name: Stamp Python component version
-        shell: python
-        env:
-          VERSION: ${{ steps.identity.outputs.version }}
-        run: |
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["VERSION"]
-          init = Path("ganet/__init__.py")
-          value = init.read_text(encoding="utf-8")
-          value, count = re.subn(
-              r'^__version__ = "[^"]+"$',
-              f'__version__ = "{version}"',
-              value,
-              count=1,
-              flags=re.MULTILINE,
-          )
-          if count != 1:
-              raise SystemExit("package version declaration was not found exactly once")
-          init.write_text(value, encoding="utf-8")
-
       - name: Test Python component
         shell: bash
         run: |
@@ -105,14 +82,11 @@ jobs:
 
       - name: Verify source component layout
         shell: pwsh
-        env:
-          VERSION: ${{ steps.identity.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           $inspection = python -m ganet inspect-component --json | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or -not $inspection.ok -or `
               $inspection.layout -ne "source" -or `
-              $inspection.version -ne $env:VERSION -or `
               $inspection.packageRoot -ne (Resolve-Path $PWD).Path) {
             throw "GAnet source component inspection failed"
           }

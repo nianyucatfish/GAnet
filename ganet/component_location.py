@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import __version__, paths
+from . import paths
 
 _SCHEMA_VERSION = 1
 _STATE_ROOT = Path.home() / ".genericagent" / "ganet"
@@ -22,6 +22,26 @@ def location_path() -> Path:
 
 def _resolved(value: str | os.PathLike[str]) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _git_commit(component_root: Path) -> str | None:
+    """Best-effort HEAD commit of the checkout, without invoking git."""
+    git_dir = component_root / ".git"
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not head.startswith("ref: "):
+        return head[:12] or None
+    ref = head[5:].strip()
+    with contextlib.suppress(OSError):
+        return (git_dir / Path(*ref.split("/"))).read_text(encoding="utf-8").strip()[:12] or None
+    with contextlib.suppress(OSError):
+        for line in (git_dir / "packed-refs").read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == ref:
+                return parts[0][:12]
+    return None
 
 
 def inspect_component(root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
@@ -41,11 +61,11 @@ def inspect_component(root: str | os.PathLike[str] | None = None) -> dict[str, A
     result: dict[str, Any] = {
         "ok": not missing,
         "schema": _SCHEMA_VERSION,
-        "version": __version__,
         "packageRoot": str(component_root),
         "launcher": str(launcher),
         "layout": "source",
         "git": (component_root / ".git").exists(),
+        "commit": _git_commit(component_root),
     }
     if missing:
         result["status"] = "incomplete"
@@ -72,7 +92,7 @@ def record_component(result: dict[str, Any]) -> Path:
         "schema": _SCHEMA_VERSION,
         "package_root": result["packageRoot"],
         "launcher": result["launcher"],
-        "version": result["version"],
+        "commit": result["commit"],
         "updated_at": int(time.time()),
     }
     destination = location_path()

@@ -40,19 +40,39 @@ def test_inspect_source_component_reports_stable_identity(
     assert result["status"] == "ready"
     assert result["layout"] == "source"
     assert result["git"] is False
+    assert result["commit"] is None
     assert Path(result["packageRoot"]) == root.resolve()
     assert Path(result["launcher"]) == (root / "ganet.cmd").resolve()
     assert not isolated_location.exists()
 
 
-def test_inspect_reports_git_checkout(tmp_path: Path) -> None:
+def test_inspect_reports_commit_from_loose_ref(tmp_path: Path) -> None:
     root = _write_component(tmp_path / "Component")
-    (root / ".git").mkdir()
+    (root / ".git" / "refs" / "heads").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (root / ".git" / "refs" / "heads" / "main").write_text("a" * 40 + "\n", encoding="utf-8")
 
     result = component_location.inspect_component(root)
 
     assert result["ok"] is True
     assert result["git"] is True
+    assert result["commit"] == "a" * 12
+
+
+def test_inspect_reports_commit_from_packed_refs(tmp_path: Path) -> None:
+    root = _write_component(tmp_path / "Component")
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (root / ".git" / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n" + "b" * 40 + " refs/heads/main\n",
+        encoding="utf-8",
+    )
+
+    result = component_location.inspect_component(root)
+
+    assert result["ok"] is True
+    assert result["git"] is True
+    assert result["commit"] == "b" * 12
 
 
 def test_inspect_rejects_incomplete_component(tmp_path: Path) -> None:
@@ -81,7 +101,7 @@ def test_refresh_records_current_location_atomically(
     assert record["schema"] == 1
     assert Path(record["package_root"]) == root.resolve()
     assert Path(record["launcher"]) == (root / "ganet.cmd").resolve()
-    assert record["version"] == result["version"]
+    assert record["commit"] == result["commit"]
     assert not isolated_location.with_suffix(".json.tmp").exists()
 
 
