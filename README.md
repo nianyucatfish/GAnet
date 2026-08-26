@@ -49,9 +49,10 @@ and current component root. `configure-host` and a normal user-center launch
 atomically refresh the non-secret discovery record at
 `~/.genericagent/ganet/component.json`. GenericAgent can use that record to find
 a previously installed or moved component, but must still call the identity
-check before trusting the recorded path. New installations default to
-`%LOCALAPPDATA%\GenericAgent\GAnet\Component\` on Windows; the component remains
-movable, and starting it from its new location refreshes the record.
+check before trusting the recorded path. The clone location is chosen at
+install time (GenericAgent defaults to its own `temp\GAnet` directory); the
+component remains movable, and starting it from its new location refreshes the
+record.
 
 ## State and trust boundaries
 

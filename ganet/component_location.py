@@ -20,13 +20,6 @@ def location_path() -> Path:
     return _LOCATION_PATH
 
 
-def default_install_root() -> Path:
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        return Path(local).expanduser() / "GenericAgent" / "GAnet" / "Component"
-    return Path.home() / ".local" / "share" / "GenericAgent" / "GAnet" / "Component"
-
-
 def _resolved(value: str | os.PathLike[str]) -> Path:
     return Path(value).expanduser().resolve()
 
@@ -53,7 +46,6 @@ def inspect_component(root: str | os.PathLike[str] | None = None) -> dict[str, A
         "launcher": str(launcher),
         "layout": "source",
         "git": (component_root / ".git").exists(),
-        "defaultInstallRoot": str(default_install_root().resolve()),
     }
     if missing:
         result["status"] = "incomplete"
