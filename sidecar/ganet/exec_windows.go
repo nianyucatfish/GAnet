@@ -8,10 +8,20 @@ import (
 	"syscall"
 )
 
+// shellCommand mirrors Windows OpenSSH sshd, which pastes the SSH exec payload
+// verbatim into `cmd.exe /c "<payload>"`. Clients craft their command lines for
+// exactly that parse: the phone bridge wraps its launcher path in doubled
+// quotes so the two cmd layers each strip one pair. Go's default argument
+// quoting would instead escape quotes as \" which cmd.exe cannot parse, so the
+// raw command line is supplied directly.
 func shellCommand(command string) *exec.Cmd {
-	cmd := exec.Command("cmd.exe", "/c", command)
-	// The sidecar runs without a console; keep spawned children from flashing one.
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	cmd := exec.Command("cmd.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		// The sidecar runs without a console; keep spawned children from flashing one.
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+		CmdLine:       `cmd.exe /c "` + command + `"`,
+	}
 	return cmd
 }
 
