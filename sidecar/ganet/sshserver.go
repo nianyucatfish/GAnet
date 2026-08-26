@@ -209,6 +209,14 @@ func (s *sshService) handleConn(conn net.Conn, origin string) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 	defer server.Close()
+	// connDone closes when the transport dies. Sessions key process cleanup on
+	// this, never on stdin EOF: the phone half-closes after sending a request
+	// and keeps the connection open while it waits for the reply.
+	connDone := make(chan struct{})
+	go func() {
+		_ = server.Wait()
+		close(connDone)
+	}()
 	// Global requests carry keepalives and forwarding attempts; forwarding is
 	// answered with failure by discarding, keepalives need no state.
 	go ssh.DiscardRequests(requests)
@@ -221,7 +229,7 @@ func (s *sshService) handleConn(conn net.Conn, origin string) {
 		if acceptErr != nil {
 			continue
 		}
-		go s.handleSession(channel, channelRequests)
+		go s.handleSession(channel, channelRequests, connDone)
 	}
 }
 
@@ -229,7 +237,7 @@ type exitStatusMsg struct {
 	Status uint32
 }
 
-func (s *sshService) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
+func (s *sshService) handleSession(channel ssh.Channel, requests <-chan *ssh.Request, connDone <-chan struct{}) {
 	defer channel.Close()
 	started := false
 	for request := range requests {
@@ -246,7 +254,7 @@ func (s *sshService) handleSession(channel ssh.Channel, requests <-chan *ssh.Req
 			}
 			started = true
 			_ = request.Reply(true, nil)
-			s.runExec(channel, payload.Command)
+			s.runExec(channel, payload.Command, connDone)
 			return
 		case "subsystem":
 			if started {
@@ -273,7 +281,7 @@ func (s *sshService) handleSession(channel ssh.Channel, requests <-chan *ssh.Req
 	}
 }
 
-func (s *sshService) runExec(channel ssh.Channel, command string) {
+func (s *sshService) runExec(channel ssh.Channel, command string, connDone <-chan struct{}) {
 	cmd := shellCommand(command)
 	if home, err := os.UserHomeDir(); err == nil {
 		cmd.Dir = home
@@ -290,22 +298,21 @@ func (s *sshService) runExec(channel ssh.Channel, command string) {
 		s.exit(channel, 127)
 		return
 	}
+	// The single reader of the channel: request bytes flow to the tool, and
+	// the client's EOF (a normal request boundary, like sshd) closes the
+	// tool's stdin while the tool keeps running and replying.
 	go func() {
 		_, _ = io.Copy(stdin, channel)
 		_ = stdin.Close()
 	}()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	// A dropped connection must not leave the process tree running.
-	closed := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(io.Discard, channel) // returns once the channel closes
-		close(closed)
-	}()
 	var waitErr error
 	select {
 	case waitErr = <-done:
-	case <-closed:
+	case <-connDone:
+		// The client vanished mid-run; nothing can read the reply anymore,
+		// so the process tree must not linger.
 		select {
 		case waitErr = <-done:
 		case <-time.After(2 * time.Second):
