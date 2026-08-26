@@ -105,6 +105,8 @@ def _validate_manifest(value: Any) -> list[dict[str, Any]]:
         if entry["update_level"] not in ("available", "required"):
             raise RuntimeError("GAnet 组件更新级别无效")
         result.append({**entry, "manifest_verified": True})
+    # 从新到旧排列,拿“第一条匹配”的调用方也会得到最新版本。
+    result.sort(key=lambda entry: _version_tuple(str(entry["version"])), reverse=True)
     return result
 
 

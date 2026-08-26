@@ -33,6 +33,20 @@ class NetworkComponentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "签名"):
             self.component._validate_manifest({"signed": {"schema": 1}, "signature": "AAAA"})
 
+    def test_manifest_entries_are_listed_newest_first(self):
+        def entry(version):
+            return {"platform": "windows", "architecture": "amd64",
+                    "version": version, "protocol_version": "1",
+                    "url": "https://ganet.gaagent.ai/releases/sidecar/x.exe",
+                    "sha256": "0" * 64, "size": 1, "update_level": "available"}
+        manifest = {"signed": {"schema": 1, "component": "ganet-sidecar",
+                               "releases": [entry("0.2.1"), entry("0.10.0"), entry("0.3.0")]},
+                    "signature": "AAAA"}
+        with mock.patch.object(self.component, "_verify_signature"):
+            got = self.component._validate_manifest(manifest)
+        self.assertEqual([release["version"] for release in got],
+                         ["0.10.0", "0.3.0", "0.2.1"])
+
     def test_inspect_keeps_working_install_unknown_when_release_unavailable(self):
         with mock.patch.object(self.component, "_status", return_value={
                 "installed": True, "running": True, "online": True, "listening": True,
