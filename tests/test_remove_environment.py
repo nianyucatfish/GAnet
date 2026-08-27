@@ -2,9 +2,23 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+import types
 
-from ganet.device_access import interactive_worker
+import ganet.device_access as device_access_pkg
 from ganet.device_connection import network, pairing, sidecar_manager
+
+_WORKER_MODULE = "ganet.device_access.interactive_worker"
+
+
+def _stub_worker_module(monkeypatch, calls):
+    """Replace the worker module before import: the real one resolves the host
+    binding at import time and would fail on an unconfigured test machine."""
+    stub = types.ModuleType(_WORKER_MODULE)
+    stub.stop_worker = lambda: (calls.__setitem__("worker", calls["worker"] + 1)
+                                or {"ok": True, "stopped": True, "detail": ""})
+    monkeypatch.setitem(sys.modules, _WORKER_MODULE, stub)
+    monkeypatch.setattr(device_access_pkg, "interactive_worker", stub, raising=False)
 
 
 def _prepare(monkeypatch, tmp_path, *, token):
@@ -19,15 +33,13 @@ def _prepare(monkeypatch, tmp_path, *, token):
     executable.write_bytes(b"stub")
 
     calls = {"remote": [], "worker": 0, "service": 0, "commands": []}
+    _stub_worker_module(monkeypatch, calls)
     monkeypatch.setattr(pairing.login, "get_token", lambda: token)
     monkeypatch.setattr(network, "load_receipt", lambda: {"hostname": "ga-pc-test"})
     monkeypatch.setattr(network, "_retire_remote",
                         lambda tok, host: calls["remote"].append((tok, host)))
     monkeypatch.setattr(network, "managed_authorized_keys_path",
                         lambda: config_dir / "authorized_keys")
-    monkeypatch.setattr(interactive_worker, "stop_worker",
-                        lambda: (calls.__setitem__("worker", calls["worker"] + 1)
-                                 or {"ok": True, "stopped": True, "detail": ""}))
     monkeypatch.setattr(sidecar_manager, "_stop_running",
                         lambda: calls.__setitem__("service", calls["service"] + 1))
     monkeypatch.setattr(sidecar_manager, "_ROOT", sidecar_dir)
@@ -88,6 +100,20 @@ def test_remove_environment_remote_failure_does_not_block_local(monkeypatch, tmp
     result = pairing.remove_environment(approved=True)
     assert result["status"] == "removed"
     assert result["steps"]["remote"].startswith("failed")
+    assert not config_dir.exists()
+    assert not sidecar_dir.exists()
+
+
+def test_remove_environment_skips_worker_when_runtime_unbound(monkeypatch, tmp_path):
+    config_dir, sidecar_dir, _executable, calls = _prepare(monkeypatch, tmp_path, token=None)
+    # An unbound machine cannot even import the worker module; a None entry in
+    # sys.modules makes both import forms raise ImportError the same way.
+    monkeypatch.setitem(sys.modules, _WORKER_MODULE, None)
+    monkeypatch.delattr(device_access_pkg, "interactive_worker", raising=False)
+    result = pairing.remove_environment(approved=True)
+    assert result["status"] == "removed"
+    assert result["steps"]["worker"] == "skipped"
+    assert calls["worker"] == 0
     assert not config_dir.exists()
     assert not sidecar_dir.exists()
 

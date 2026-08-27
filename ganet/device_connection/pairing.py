@@ -882,10 +882,16 @@ def remove_environment(*, approved: bool = False) -> dict:
         return {"status": "needs_approval", "changed": False,
                 "steps": list(_UNINSTALL_PLAN),
                 "message": "将卸载本机 GAnet 设备互联环境；组件代码目录保留"}
+    # interactive_worker resolves the host binding at import time, so on a
+    # half-configured machine the import itself raises. No binding also means
+    # no worker was ever started, so skipping the stop step is the truth.
     try:
-        from ..device_access import interactive_worker
-    except ImportError:
-        from device_access import interactive_worker  # type: ignore[no-redef]
+        try:
+            from ..device_access import interactive_worker
+        except ImportError:
+            from device_access import interactive_worker  # type: ignore[no-redef]
+    except (ImportError, RuntimeError):
+        interactive_worker = None  # type: ignore[assignment]
     try:
         from . import sidecar_manager
     except ImportError:
@@ -907,11 +913,14 @@ def remove_environment(*, approved: bool = False) -> dict:
     else:
         steps["remote"] = "skipped"
 
-    try:
-        worker = interactive_worker.stop_worker()
-        steps["worker"] = "ok" if worker.get("ok") else f"failed: {worker.get('detail')}"
-    except (RuntimeError, OSError) as exc:
-        steps["worker"] = f"failed: {exc}"
+    if interactive_worker is None:
+        steps["worker"] = "skipped"
+    else:
+        try:
+            worker = interactive_worker.stop_worker()
+            steps["worker"] = "ok" if worker.get("ok") else f"failed: {worker.get('detail')}"
+        except (RuntimeError, OSError) as exc:
+            steps["worker"] = f"failed: {exc}"
 
     try:
         sidecar_manager._stop_running()
