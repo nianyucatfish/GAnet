@@ -297,6 +297,17 @@ def _stop_running() -> None:
     if pid and os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
                        timeout=20)
+    if os.name == "nt":
+        # A wedged sidecar can hold the executable lock while its own status
+        # command reports no pid; sweep by image path so an upgrade can still
+        # replace the file. Matching on the full path spares unrelated builds.
+        path = str(_EXECUTABLE).replace("'", "''")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process | "
+             "Where-Object { $_.ExecutablePath -eq '" + path + "' } | "
+             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+            capture_output=True, timeout=30)
     deadline = time.monotonic() + 15
     while _status().get("running") and time.monotonic() < deadline:
         time.sleep(0.25)
@@ -430,8 +441,9 @@ def install_release(verified: VerifiedRelease) -> dict[str, Any]:
     previous_state = _status()
     replaced = False
     try:
-        if previous_state.get("running"):
-            _stop_running()
+        # Unconditional: a wedged process may not report as running yet still
+        # hold the executable lock that would break the replace below.
+        _stop_running()
         shutil.copy2(verified.path, staged)
         if had_old:
             shutil.copy2(_EXECUTABLE, backup)

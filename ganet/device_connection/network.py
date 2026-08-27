@@ -531,7 +531,15 @@ def check_env() -> dict[str, Any]:
     except (TypeError, ValueError):
         port = DEFAULT_SSH_PORT
     embedded = provider.name == "embedded-tsnet"
+    listening = _port_listening(port)
     ssh_probe = (config.get("ssh_probe") if isinstance(config.get("ssh_probe"), dict) else {})
+    if ssh_probe and not (runtime.get("running") and runtime.get("listening")
+                          and runtime.get("ssh_loopback") and listening):
+        # A cached probe verdict describes the service state it was measured
+        # against; once the live SSH chain is down it must not present as a
+        # current result next to red service nodes.
+        ssh_probe = {"detail": "SSH 服务状态已变化，需重新验证",
+                     "checked_at": ssh_probe.get("checked_at")}
     provider_available = provider.available() if hasattr(provider, "available") else provider.binary_ok()
     component = {"version_state": "unknown", "reason": ""}
     if embedded:
@@ -556,7 +564,7 @@ def check_env() -> dict[str, Any]:
         "managed_keys": managed_authorized_keys_path().is_file(),
         "managed_keys_acl": _managed_keys_acl_ok(),
         "ssh_probe": ssh_probe.get("ok") if isinstance(ssh_probe.get("ok"), bool) else None,
-        "listening": _port_listening(port),
+        "listening": listening,
     }
     chain = [
         {"key": "base", "label": "基础环境", "ok": checks["network_provider"] and checks["qr_component"]
