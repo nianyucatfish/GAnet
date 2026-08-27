@@ -431,6 +431,9 @@ func (st *runtimeState) refresh(expectedControlURL string) {
 }
 
 func main() {
+	// tsnet would otherwise upload network diagnostics to Tailscale Inc.'s
+	// logtail service; this deployment must not leak telemetry off-site.
+	os.Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: ganet-sidecar <run|status|version|host-key|autostart>")
 		os.Exit(2)
