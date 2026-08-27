@@ -795,34 +795,21 @@ def configure_environment(*, approved: bool = False,
     if missing_project_components:
         return {"status": "needs_project_setup", "changed": False, "environment": report,
                 "message": "请先补齐当前 GA 环境：" + "、".join(missing_project_components)}
-    component_required = (report.get("provider") == "embedded-tsnet" and
-                          report.get("version_state") == "required")
-    if ("GAnet 网络组件" in missing_system_components or component_required) and approved:
-        try:
-            from . import sidecar_manager
-            releases = sidecar_manager.list_releases()
-            release = sidecar_manager.select_release(releases)
-            downloaded = sidecar_manager.download_release(release)
-            verified = sidecar_manager.verify_release(downloaded, release)
-            sidecar_manager.install_release(verified)
-            report = env.check_env()
-            missing_system_components = [label for key, label in (
-                ("network_provider", "GAnet 网络组件"),
-            ) if not report["checks"].get(key, False)]
-        except RuntimeError as exc:
-            return {"status": "blocked", "changed": False, "stage": "network_component",
-                    "environment": env.check_env(), "message": str(exc)}
+    # Installing or replacing the network component is the staged, user-visible
+    # flow in sidecar_manager; this call only configures and enrolls what is
+    # already installed, and reports missing pieces instead of fetching them.
+    if missing_system_components:
+        return {"status": "needs_system_setup", "changed": False, "environment": report,
+                "message": "请先安装：" + "、".join(missing_system_components)}
+    if (report.get("provider") == "embedded-tsnet"
+            and report.get("version_state") == "required"):
+        return {"status": "needs_system_setup", "changed": False, "environment": report,
+                "message": "GAnet 网络组件需要更新，请先完成组件替换"}
     # SSH service state (running/listening) follows enrollment, which happens
     # below; configuration here only covers the user-owned local facts.
     configuration_checks = ["managed_keys", "managed_keys_acl", "host_key"]
     needs_ganet_configuration = any(not report["checks"].get(key, False)
                                     for key in configuration_checks)
-    if component_required and not approved:
-        return {"status": "needs_approval", "changed": False, "environment": report,
-                "message": "需要更新 GAnet 网络组件"}
-    if missing_system_components:
-        return {"status": "needs_system_setup", "changed": False, "environment": report,
-                "message": "请先安装：" + "、".join(missing_system_components)}
     try:
         from . import auth as login
     except ImportError:

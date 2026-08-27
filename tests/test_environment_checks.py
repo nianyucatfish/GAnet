@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from ganet.device_connection import network, sidecar_manager
+from ganet.device_connection import network, pairing, sidecar_manager
 
 
 class _FakeProvider:
@@ -58,6 +58,47 @@ def test_check_env_keeps_cached_probe_while_service_up(monkeypatch, tmp_path):
     report = network.check_env()
     assert report["checks"]["ssh_probe"] is True
     assert report["ssh_probe"]["detail"] == _PROBE["detail"]
+
+
+def _fake_env_report(*, installed, version_state):
+    return {"status": "need_install" if not installed else "need_repair",
+            "provider": "embedded-tsnet", "version_state": version_state,
+            "checks": {"qr_component": True, "screenshot_media": True,
+                       "network_provider": installed},
+            "receipt": {}, "runtime": {}}
+
+
+def _forbid_install(monkeypatch):
+    calls = []
+    for name in ("list_releases", "select_release", "download_release",
+                 "verify_release", "install_release"):
+        monkeypatch.setattr(sidecar_manager, name,
+                            lambda *args, _name=name, **kwargs: calls.append(_name))
+    return calls
+
+
+def test_configure_environment_reports_missing_component_without_installing(monkeypatch):
+    """configure_environment must not fetch the sidecar itself; installing is
+    the staged section-3 flow, so a missing component is only reported."""
+    calls = _forbid_install(monkeypatch)
+    monkeypatch.setattr(network, "check_env",
+                        lambda: _fake_env_report(installed=False, version_state="required"))
+    monkeypatch.setattr(network, "initial_network_defaults_pending", lambda: False)
+    result = pairing.configure_environment(approved=True)
+    assert result["status"] == "needs_system_setup"
+    assert "GAnet 网络组件" in result["message"]
+    assert not calls
+
+
+def test_configure_environment_reports_required_update_without_installing(monkeypatch):
+    calls = _forbid_install(monkeypatch)
+    monkeypatch.setattr(network, "check_env",
+                        lambda: _fake_env_report(installed=True, version_state="required"))
+    monkeypatch.setattr(network, "initial_network_defaults_pending", lambda: False)
+    result = pairing.configure_environment(approved=True)
+    assert result["status"] == "needs_system_setup"
+    assert "更新" in result["message"]
+    assert not calls
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process sweep")
