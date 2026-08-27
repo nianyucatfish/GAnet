@@ -858,6 +858,117 @@ def configure_environment(*, approved: bool = False,
             "message": "" if probe.get("ok") else probe.get("detail", "模拟手机请求未通过")}
 
 
+# ---- uninstall ----
+
+import os
+import shutil
+import time
+
+_UNINSTALL_PLAN = (
+    "注销远端设备记录（未登录则跳过）",
+    "停止常驻 Worker 与 GAnet 网络组件",
+    "移除登录自启动",
+    "删除配对密钥、配对记录与本机 GAnet 数据（组件代码目录保留）",
+)
+
+
+def remove_environment(*, approved: bool = False) -> dict:
+    """Plan or apply the fixed PC-side uninstall sequence.
+
+    The component checkout itself stays: without the local state removed here
+    the code is inert, and keeping it makes a later reconfiguration one step.
+    """
+    if not approved:
+        return {"status": "needs_approval", "changed": False,
+                "steps": list(_UNINSTALL_PLAN),
+                "message": "将卸载本机 GAnet 设备互联环境；组件代码目录保留"}
+    try:
+        from ..device_access import interactive_worker
+    except ImportError:
+        from device_access import interactive_worker  # type: ignore[no-redef]
+    try:
+        from . import sidecar_manager
+    except ImportError:
+        import sidecar_manager  # type: ignore[no-redef]
+
+    steps: dict[str, str] = {}
+
+    # Remote retirement is best-effort by design: local removal must not
+    # depend on the login session or the registry service being reachable.
+    receipt = env.load_receipt() or {}
+    token = login.get_token()
+    hostname = receipt.get("hostname")
+    if token and hostname:
+        try:
+            network._retire_remote(token, str(hostname))
+            steps["remote"] = "ok"
+        except RuntimeError as exc:
+            steps["remote"] = f"failed: {exc}"
+    else:
+        steps["remote"] = "skipped"
+
+    try:
+        worker = interactive_worker.stop_worker()
+        steps["worker"] = "ok" if worker.get("ok") else f"failed: {worker.get('detail')}"
+    except (RuntimeError, OSError) as exc:
+        steps["worker"] = f"failed: {exc}"
+
+    try:
+        sidecar_manager._stop_running()
+        steps["service"] = "ok"
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        steps["service"] = f"failed: {exc}"
+
+    steps["autostart"] = _remove_autostart(Path(sidecar_manager._EXECUTABLE))
+
+    config_dir = Path(network.managed_authorized_keys_path()).parent
+    steps["sidecar_data"] = _remove_tree(Path(sidecar_manager._ROOT))
+    steps["local_state"] = _remove_tree(config_dir)
+
+    local_failed = [name for name, state in steps.items()
+                    if name != "remote" and state.startswith("failed")]
+    if local_failed:
+        return {"status": "partial", "changed": True, "steps": steps,
+                "message": "部分卸载步骤未完成：" + "、".join(local_failed)}
+    return {"status": "removed", "changed": True, "steps": steps,
+            "message": "GAnet 已从本机卸载；组件代码目录保留，可随时重新配置"}
+
+
+def _remove_autostart(executable: Path) -> str:
+    if os.name != "nt":
+        return "skipped"
+    binary_present = executable.is_file()
+    # The sidecar owns autostart install/remove; once its binary is gone, fall
+    # back to deleting the same registry value it would have removed.
+    command = ([str(executable), "autostart", "remove"] if binary_present else
+               ["reg.exe", "delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v", "GenericAgent GAnet", "/f"])
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"failed: {exc}"
+    if completed.returncode and binary_present:
+        detail = (completed.stderr or completed.stdout or b"").decode(errors="replace")
+        return "failed: " + detail.strip()[:200]
+    # reg.exe reports an error for an already-absent value; absence is success.
+    return "ok"
+
+
+def _remove_tree(root: Path) -> str:
+    if not root.exists():
+        return "ok"
+    for attempt in range(2):
+        try:
+            shutil.rmtree(root)
+            return "ok"
+        except OSError as exc:
+            # Freshly killed processes can release file handles a beat later.
+            if attempt:
+                return f"failed: {exc}"
+            time.sleep(1.0)
+    return "ok"
+
+
 def get_user_center_state() -> dict:
     """Return the fast local facts for the user center.
 
