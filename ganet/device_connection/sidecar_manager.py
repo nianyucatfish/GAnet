@@ -301,13 +301,19 @@ def _stop_running() -> None:
         # A wedged sidecar can hold the executable lock while its own status
         # command reports no pid; sweep by image path so an upgrade can still
         # replace the file. Matching on the full path spares unrelated builds.
+        # Filtering by process name first keeps this far cheaper than a full
+        # Win32_Process enumeration, which exceeded 30 seconds on slow hosts.
+        # The sweep stays best-effort: a survivor shows up afterwards as a
+        # locked-file error in the replace or delete step.
+        name = _EXECUTABLE.stem.replace("'", "''")
         path = str(_EXECUTABLE).replace("'", "''")
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "Get-CimInstance Win32_Process | "
-             "Where-Object { $_.ExecutablePath -eq '" + path + "' } | "
-             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
-            capture_output=True, timeout=30)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-Process -Name '" + name + "' -ErrorAction SilentlyContinue | "
+                 "Where-Object { $_.Path -eq '" + path + "' } | "
+                 "Stop-Process -Force"],
+                capture_output=True, timeout=60)
     deadline = time.monotonic() + 15
     while _status().get("running") and time.monotonic() < deadline:
         time.sleep(0.25)
