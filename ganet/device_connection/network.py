@@ -636,14 +636,17 @@ import argparse
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 
 
 _HTTP_TIMEOUT = 30
 
 
 def _request_enrollment(token: str, hostname: str) -> dict:
+    # Deferred: urllib drags in http.client/ssl, a large share of the startup
+    # of the per-call bridge shell, which imports this module only for config.
+    import urllib.error
+    import urllib.request
+
     metadata = env.local_device_metadata()
     metadata["displayName"] = hostname
     metadata["meshHostname"] = hostname
@@ -765,12 +768,14 @@ import argparse
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 
 
 
 def _retire_remote(token: str, hostname: str) -> None:
+    # Deferred for the same reason as _request_enrollment.
+    import urllib.error
+    import urllib.request
+
     request = urllib.request.Request(
         env.PROVISION_BASE + "/devices/" + hostname, method="DELETE",
         headers={"Authorization": "Bearer " + token},
