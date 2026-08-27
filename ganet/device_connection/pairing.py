@@ -471,7 +471,7 @@ def _qr_svg(payload: str) -> str:
     except ImportError as exc:
         raise RuntimeError(
             "缺少二维码组件，先对 GA 发送“"
-            "帮我配置设备互联。”"
+            "帮我配置 GAnet。”"
         ) from exc
     qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M,
                        box_size=8, border=4)
