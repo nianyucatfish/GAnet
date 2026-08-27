@@ -1,9 +1,10 @@
 # GAnet code-signing policy
 
-GAnet intends to use SignPath.io free code signing provided by
-[SignPath Foundation](https://signpath.org/) for official Windows releases.
-Until that enrollment is approved and the workflow verifies an Authenticode
-signature, a release must be described as unsigned.
+Official Windows GAnet releases are distributed without Authenticode signing,
+a deliberate decision (2026-08-27) consistent with GenericAgent Desktop.
+Releases must be described as unsigned and must not be represented as
+compatible with Windows Smart App Control. Release integrity is provided by
+the build and mirror controls below.
 
 ## Scope
 
@@ -26,17 +27,11 @@ its own.
 
 ## Signing controls
 
-- Authenticode signing must use a publicly trusted code-signing service whose
-  private key remains in protected service/HSM storage.
+- The server's Ed25519 manifest key is the only release-signing credential; it
+  stays in restricted server storage, is used only by the mirror's sync
+  script, and must never be read, printed, downloaded, or copied elsewhere.
 - Signing credentials and private keys must never be committed, included in an
-  artifact, printed in logs, copied to the release mirror, or exposed to the
-  build output.
-- A signing request is accepted only for an artifact produced by this
-  repository's GitHub-hosted release workflow.
-- Release signing requires approval by a designated GAnet maintainer.
-- SHA-256 file digests and an RFC 3161 timestamp are required.
-- An unsigned Windows sidecar must not be represented as compatible with
-  Windows Smart App Control.
+  artifact, printed in logs, or exposed to the build output.
 
 ## Roles
 
@@ -45,12 +40,10 @@ The current project team is the GitHub repository owner and maintainer,
 
 - **Author and reviewer:** maintains repository code and build scripts and
   reviews contributions from people without direct commit access.
-- **Approver:** manually authorizes release signing requests.
+- **Approver:** manually publishes releases.
 - **Build service:** GitHub Actions builds, tests, and records provenance.
-- **Signing service:** SignPath verifies the trusted build origin and applies
-  the Authenticode signature without exporting the private key.
-- **Release mirror:** verifies GitHub Release identity and mirrors the signed
-  sidecar; it cannot request or create an Authenticode signature.
+- **Release mirror:** verifies GitHub Release identity, mirrors the sidecar,
+  and signs the canonical update manifest with the server-only Ed25519 key.
 
 ## Privacy
 
