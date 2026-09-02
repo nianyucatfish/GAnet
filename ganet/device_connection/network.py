@@ -21,23 +21,23 @@ import time
 import uuid
 from typing import Any
 
+try:
+    from . import sidecar_paths
+except ImportError:  # direct script execution
+    import sidecar_paths  # type: ignore[no-redef]
+
 BASE = os.environ.get("GA_NET_BASE", "https://ganet.gaagent.ai").rstrip("/")
 AUTH_BASE = os.environ.get("GA_AUTH_URL", "https://auth.gaagent.ai").rstrip("/")
 PROVISION_BASE = BASE + "/provision"
-_IS_WIN = sys.platform == "win32"
+_IS_WIN = sidecar_paths.is_windows()
+_IS_MAC = sidecar_paths.is_macos()
 _RECEIPT_DIR = os.path.join(os.path.expanduser("~"), ".genericagent", "ganet")
 _CONFIG_PATH = os.path.join(_RECEIPT_DIR, "config.json")
 _RECEIPT_PATH = os.path.join(_RECEIPT_DIR, "mesh_receipt.json")
 _SETUP_LOG_PATH = os.path.join(_RECEIPT_DIR, "setup-elevated.log")
 DEFAULT_SSH_PORT = 48222
-_SIDECAR_ROOT = os.environ.get(
-    "GANET_SIDECAR_DIR",
-    os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-                 "GenericAgent", "GAnet"),
-)
-_SIDECAR_EXE = os.environ.get("GANET_SIDECAR_EXE", os.path.join(_SIDECAR_ROOT, "ganet-sidecar.exe"))
-_SIDECAR_SOURCE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "sidecar",
-                                               "ganet", "ganet-sidecar.exe"))
+_SIDECAR_ROOT = str(sidecar_paths.sidecar_root())
+_SIDECAR_EXE = str(sidecar_paths.sidecar_executable())
 
 
 def _reset_setup_log() -> None:
@@ -74,14 +74,34 @@ def find_tailscale() -> str | None:
     return None
 
 
+def _raw_hostname() -> str:
+    """Return the machine's own name, not whatever DNS calls its address.
+
+    On macOS ``gethostname()`` follows the network: on a LAN without reverse
+    DNS it returns the IP address itself, so the user-visible LocalHostName is
+    preferred there. An IP-shaped name is discarded on every platform.
+    """
+    if _IS_MAC:
+        result = _run(["scutil", "--get", "LocalHostName"], timeout=5)
+        local = (result.stdout or "").strip()
+        if result.returncode == 0 and local:
+            return local
+    raw = socket.gethostname()
+    if re.fullmatch(r"[0-9.]+|[0-9a-fA-F:]*:[0-9a-fA-F:]*", raw):
+        return ""
+    return raw.split(".")[0]
+
+
 def default_hostname() -> str:
-    raw = socket.gethostname().split(".")[0]
+    raw = _raw_hostname()
     name = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
     if name:
         return name
-    # Non-ASCII hostnames (common on localized Windows) sanitize to empty; derive a
-    # stable per-machine suffix so several such computers do not all show as "ga-pc".
-    suffix = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8] if raw else ""
+    # Non-ASCII hostnames (common on localized Windows) and IP-shaped ones
+    # sanitize to empty; derive a stable per-machine suffix so several such
+    # computers do not all show as "ga-pc".
+    seed = raw or socket.gethostname()
+    suffix = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8] if seed else ""
     return f"ga-pc-{suffix}" if suffix else "ga-pc"
 
 
@@ -258,7 +278,20 @@ class SystemTailscaleProvider:
             raise RuntimeError(f"退出私有网络失败：{(result.stderr or result.stdout)[:240]}")
 
 
-class WindowsTsnetSidecarProvider:
+def _terminate_process(pid: int, *, wait_seconds: float = 15) -> None:
+    """Stop a sidecar process politely, then forcefully, on any platform."""
+    if _IS_WIN:
+        _run(["taskkill", "/PID", str(pid), "/T"], timeout=15)
+        return
+    sidecar_paths.posix_terminate(pid, grace=wait_seconds)
+
+
+class TsnetSidecarProvider:
+    """The GAnet network component: tsnet node plus embedded SSH in one process.
+
+    Windows and macOS both use it; the class name once said Windows because
+    that was the only supported desktop.
+    """
     name = "embedded-tsnet"
     probe_seconds = 5
 
@@ -291,7 +324,13 @@ class WindowsTsnetSidecarProvider:
                 "version": detail.get("version"),
                 "protocol_version": detail.get("protocolVersion"),
                 "ssh_port": detail.get("sshPort"), "pid": detail.get("pid"),
-                "error_category": detail.get("errorCategory")}
+                "error_category": detail.get("errorCategory"),
+                # Categories only; the sidecar keeps tsnet's raw wording (which
+                # names servers) out of this surface on purpose.
+                "health_codes": [str(code) for code in detail.get("healthCodes") or []
+                                 if isinstance(code, str)],
+                # Older sidecars do not report relay state; treat absence as fine.
+                "relay_ok": bool(detail.get("relayOk", True))}
 
     def join(self, control_url: str, enrollment_grant: str, hostname: str,
              apply_initial_network_defaults: bool = False) -> None:
@@ -307,12 +346,16 @@ class WindowsTsnetSidecarProvider:
             ssh_port = int((config.get("ssh") or {}).get("port", DEFAULT_SSH_PORT))
         except (TypeError, ValueError):
             ssh_port = DEFAULT_SSH_PORT
+        # On POSIX the enrolling process must outlive the GA session that
+        # started it, so detach it into its own session; launchd takes over on
+        # the next login once autostart is installed below.
         process = subprocess.Popen(
             [self.executable, "run", "--control-url", control_url,
              "--hostname", hostname, "--ssh-port", str(ssh_port),
              "--auth-key-stdin"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             text=True, creationflags=creationflags, close_fds=True,
+            start_new_session=not _IS_WIN,
         )
         assert process.stdin is not None
         process.stdin.write(enrollment_grant)
@@ -324,6 +367,8 @@ class WindowsTsnetSidecarProvider:
                 result = _run([self.executable, "autostart", "install"], timeout=30)
                 if result.returncode:
                     raise RuntimeError("GAnet sidecar 已入网，但登录自启动配置失败")
+                if _IS_MAC:
+                    self._hand_over_to_launchd(process)
                 return
             if process.poll() is not None:
                 raise RuntimeError("GAnet sidecar 启动失败；请查看本机脱敏日志")
@@ -332,18 +377,50 @@ class WindowsTsnetSidecarProvider:
             process.terminate()
         raise RuntimeError("GAnet sidecar 入网超时")
 
+    def _hand_over_to_launchd(self, process: subprocess.Popen) -> None:
+        """Replace the enrolling process with the launchd-supervised agent.
+
+        Enrollment used a one-time grant on stdin, which launchd cannot supply,
+        so the node was started by hand; its state is on disk now and the
+        agent restores it without any key. Running under launchd from the
+        first minute means the supervision path is the one that gets tested.
+        """
+        try:
+            from . import sidecar_manager
+        except ImportError:
+            import sidecar_manager  # type: ignore[no-redef]
+        _terminate_process(process.pid, wait_seconds=10)
+        with contextlib.suppress(Exception):
+            process.wait(timeout=5)
+        sidecar_manager._start()
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            state = self.status()
+            if state.get("online") and state.get("ip"):
+                return
+            time.sleep(1)
+        raise RuntimeError("GAnet sidecar 已入网，但由登录自启动接管后未恢复在线")
+
     def leave(self) -> None:
         state = self.status()
         pid = state.get("pid")
-        if pid and _IS_WIN:
-            _run(["taskkill", "/PID", str(pid), "/T"], timeout=15)
+        if _IS_MAC:
+            # Stop launchd from respawning the node while its state is removed.
+            with contextlib.suppress(Exception):
+                _run(["launchctl", "bootout", sidecar_paths.launchd_service_target()], timeout=20)
+        if pid:
+            _terminate_process(int(pid))
         state_dir = os.path.join(_SIDECAR_ROOT, "state")
         shutil.rmtree(state_dir, ignore_errors=True)
 
 
+# Historical name kept for callers and tests written against the Windows-only era.
+WindowsTsnetSidecarProvider = TsnetSidecarProvider
+
+
 def get_provider():
-    if _IS_WIN and os.environ.get("GANET_USE_SYSTEM_TAILSCALE") != "1":
-        return WindowsTsnetSidecarProvider()
+    if (_IS_WIN or _IS_MAC) and os.environ.get("GANET_USE_SYSTEM_TAILSCALE") != "1":
+        return TsnetSidecarProvider()
     return SystemTailscaleProvider()
 
 
@@ -479,12 +556,39 @@ def ssh_device_probe(port: int | None = None) -> dict[str, Any]:
         if not (runtime.get("online") and runtime.get("ip") and runtime.get("listening")):
             return _save_ssh_probe({"ok": False,
                                     "detail": "GAnet sidecar 尚未在线监听，无法模拟手机请求"})
-    ssh = shutil.which("ssh")
-    keygen = shutil.which("ssh-keygen")
     if not isinstance(host, str) or not host:
         return _save_ssh_probe({"ok": False, "detail": "当前未获得本机 Tailnet 地址，无法模拟手机请求"})
+    try:
+        with _phone_emulation_session(host, port) as run_remote:
+            completed = run_remote("exit")
+    except _ProbeSetupError as exc:
+        return _save_ssh_probe({"ok": False, "detail": str(exc)})
+    except Exception as exc:
+        return _save_ssh_probe({"ok": False, "detail": f"模拟手机请求未完成：{type(exc).__name__}"})
+    if completed.returncode == 0:
+        detail = ("GAnet sidecar Tailnet 监听正常，内嵌 SSH 公钥认证通过"
+                  if provider.name == "embedded-tsnet"
+                  else "模拟手机 SSH 公钥认证通过")
+        return _save_ssh_probe({"ok": True, "detail": detail})
+    detail = (completed.stderr or completed.stdout).strip().replace("\n", " ")
+    return _save_ssh_probe({"ok": False, "detail": "模拟手机 SSH 公钥认证失败" + (f"：{detail[:180]}" if detail else "")})
+
+
+class _ProbeSetupError(RuntimeError):
+    """The emulated phone session could not even be prepared."""
+
+
+@contextlib.contextmanager
+def _phone_emulation_session(host: str, port: int):
+    """Yield a runner that executes commands exactly as a paired phone would.
+
+    A disposable Ed25519 key is authorized for the duration of the block and
+    removed again in every case, so nothing about the emulation outlives it.
+    """
+    ssh = shutil.which("ssh")
+    keygen = shutil.which("ssh-keygen")
     if not ssh or not keygen:
-        return _save_ssh_probe({"ok": False, "detail": "缺少 OpenSSH Client，无法模拟手机请求"})
+        raise _ProbeSetupError("缺少 OpenSSH Client，无法模拟手机请求")
     try:
         from . import pairing
     except ImportError:
@@ -496,29 +600,103 @@ def ssh_device_probe(port: int | None = None) -> dict[str, Any]:
     try:
         generated = _run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", private_key], timeout=30)
         if generated.returncode:
-            return _save_ssh_probe({"ok": False, "detail": "无法生成临时 SSH 测试密钥"})
+            raise _ProbeSetupError("无法生成临时 SSH 测试密钥")
         public_key = Path(private_key + ".pub").read_text(encoding="utf-8").strip()
         _, inserted = pairing.append_public_key(public_key)
         known_hosts = "NUL" if _IS_WIN else "/dev/null"
-        command = [ssh, "-i", private_key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
-                   "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={known_hosts}",
-                   "-o", "GlobalKnownHostsFile=none", "-o", "LogLevel=ERROR",
-                   "-o", "ConnectTimeout=12", "-p", str(port), f"{getpass.getuser()}@{host}", "exit"]
-        completed = _run(command, timeout=25)
-        if completed.returncode == 0:
-            detail = ("GAnet sidecar Tailnet 监听正常，内嵌 SSH 公钥认证通过"
-                      if provider.name == "embedded-tsnet"
-                      else "模拟手机 SSH 公钥认证通过")
-            return _save_ssh_probe({"ok": True, "detail": detail})
-        detail = (completed.stderr or completed.stdout).strip().replace("\n", " ")
-        return _save_ssh_probe({"ok": False, "detail": "模拟手机 SSH 公钥认证失败" + (f"：{detail[:180]}" if detail else "")})
-    except Exception as exc:
-        return _save_ssh_probe({"ok": False, "detail": f"模拟手机请求未完成：{type(exc).__name__}"})
+        base = [ssh, "-i", private_key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={known_hosts}",
+                "-o", "GlobalKnownHostsFile=none", "-o", "LogLevel=ERROR",
+                "-o", "ConnectTimeout=12", "-p", str(port), f"{getpass.getuser()}@{host}"]
+
+        def run_remote(command: str, timeout: int = 25) -> subprocess.CompletedProcess[str]:
+            return _run(base + [command], timeout=timeout)
+
+        yield run_remote
     finally:
         if inserted and public_key:
             with contextlib.suppress(Exception):
                 pairing.remove_public_key(public_key)
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _phone_bridge_command() -> str:
+    """The phone's own command line for this desktop (gacore/ganet.py PC_TOOL_COMMAND*)."""
+    if _IS_WIN and not _IS_MAC:
+        return 'cmd.exe /d /s /c ""%USERPROFILE%\\.genericagent\\ganet\\atomic-bridge.cmd""'
+    return "~/.genericagent/ganet/atomic-bridge"
+
+
+def _save_screen_access(result: dict[str, Any]) -> dict[str, Any]:
+    value = {"granted": result.get("granted"), "prompted": bool(result.get("prompted")),
+             "detail": str(result.get("detail") or ""), "checked_at": int(time.time())}
+    config = load_config() or {}
+    config["screen_access"] = value
+    save_config(**config)
+    return value
+
+
+def request_screen_access(port: int | None = None) -> dict[str, Any]:
+    """Ask for the desktop-capture permission from the phone's own process chain.
+
+    Only macOS needs this. The request travels over loopback SSH into the
+    sidecar exactly like a phone screenshot would, so the system prompt names
+    the sidecar and the grant applies to later remote captures. Setup is the
+    moment the user is sitting at the computer; a first remote screenshot is
+    not.
+    """
+    if not _IS_MAC:
+        return {"granted": True, "prompted": False, "detail": "当前平台无需截图授权"}
+    config = load_config() or {}
+    if port is None:
+        try:
+            port = int((config.get("ssh") or {}).get("port", DEFAULT_SSH_PORT))
+        except (TypeError, ValueError):
+            port = DEFAULT_SSH_PORT
+    provider = get_provider()
+    runtime = provider.status() if provider.binary_ok() else {}
+    if not (runtime.get("running") and runtime.get("ssh_loopback")):
+        return _save_screen_access({"granted": None, "detail": "GAnet 网络组件未运行，无法申请截图权限"})
+    try:
+        with _phone_emulation_session("127.0.0.1", port) as run_remote:
+            completed = run_remote(_phone_bridge_command() + " --screen-access", timeout=40)
+    except Exception as exc:
+        return _save_screen_access({"granted": None, "detail": f"截图权限申请未完成：{type(exc).__name__}"})
+    lines = [line for line in (completed.stdout or "").splitlines() if line.strip()]
+    payload: Any = None
+    with contextlib.suppress(json.JSONDecodeError):
+        payload = json.loads(lines[-1]) if lines else None
+    if completed.returncode or not isinstance(payload, dict) or payload.get("ok") is not True:
+        detail = (completed.stderr or "").strip().replace("\n", " ")[:180]
+        return _save_screen_access({"granted": None, "detail": "截图权限检查失败" + (f"：{detail}" if detail else "")})
+    granted = payload.get("granted")
+    if granted is True:
+        detail = "macOS 屏幕录制权限已授予，手机可远程截图"
+    elif granted is False:
+        detail = ("已在这台电脑上弹出“屏幕录制”授权请求，请为 ganet-sidecar 点击允许；"
+                  "若未见弹窗，请到“系统设置 → 隐私与安全性 → 屏幕录制”手动开启")
+    else:
+        detail = "无法确认 macOS 屏幕录制权限状态"
+    return _save_screen_access({"granted": granted, "prompted": payload.get("prompted"), "detail": detail})
+
+
+# User-facing wording for the sidecar's health categories. Deliberately free of
+# server names, addresses, and relay identities.
+_HEALTH_TEXT = {
+    "relay_unreachable": "中继服务器暂时不可达，跨网络连接可能变慢或失败",
+    "control_unreachable": "与控制面的连接暂时中断，正在自动重试",
+    "logged_out": "网络身份已失效，需要重新配置设备互联",
+    "starting": "网络组件正在启动",
+    "clock_skew": "电脑系统时间可能不准确，请校准后重试",
+    "other": "网络组件报告了异常，请稍后重试",
+}
+
+
+def _health_detail(runtime: dict[str, Any]) -> str:
+    codes = [code for code in (runtime.get("health_codes") or []) if code in _HEALTH_TEXT]
+    if not codes and not runtime.get("relay_ok", True):
+        codes = ["relay_unreachable"]
+    return "；".join(dict.fromkeys(_HEALTH_TEXT[code] for code in codes))
 
 
 def check_env() -> dict[str, Any]:
@@ -551,6 +729,7 @@ def check_env() -> dict[str, Any]:
     plugin_version_state = "unknown"
     host_key_ok = bool(_valid_ed25519_host_key(
         ((config.get("ssh") or {}).get("host_public_key"))) or _read_sidecar_host_key())
+    health_detail = _health_detail(runtime) if embedded else ""
     checks = {
         "network_component": provider.binary_ok(),
         "network_provider": provider_available,
@@ -579,7 +758,11 @@ def check_env() -> dict[str, Any]:
          ) if not ok), str(plugin.get("reason") or component.get("reason") or "")
          if "available" in (plugin_version_state, version_state) else "")},
         {"key": "network", "label": "GAnet 控制面", "ok": checks["ga_profile"],
-         "detail": "" if checks["ga_profile"] else
+         # Control-plane reachability alone hides a dead relay path behind a
+         # green node; tsnet's health verdict downgrades it to a warning.
+         "level": "warning" if checks["ga_profile"] and health_detail else
+                  ("ok" if checks["ga_profile"] else "error"),
+         "detail": health_detail if checks["ga_profile"] else
          ("GAnet 网络组件无响应，请让 GA 修复设备互联" if runtime.get("responsive") is False
           else "尚未连接 GAnet 控制面")},
         {"key": "ssh", "label": "SSH 服务", "ok": checks["ssh_service"] and checks["ssh_listening"]
@@ -606,11 +789,12 @@ def check_env() -> dict[str, Any]:
         status, hint = "ok", "设备互联环境已就绪"
     else:
         status, hint = "need_repair", "设备互联环境需要修复"
+    screen_access = config.get("screen_access") if isinstance(config.get("screen_access"), dict) else {}
     return {"status": status, "hint": hint, "provider": provider.name,
             "runtime": runtime, "component": component, "version_state": version_state,
             "plugin": plugin, "plugin_version_state": plugin_version_state,
             "receipt": receipt, "checks": checks, "chain": chain,
-            "ssh_probe": ssh_probe, "ssh_port": port}
+            "ssh_probe": ssh_probe, "ssh_port": port, "screen_access": screen_access}
 
 
 def environment_cli(argv: list[str] | None = None) -> int:

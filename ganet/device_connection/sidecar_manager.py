@@ -1,4 +1,8 @@
-"""Signed release discovery and transactional Windows GAnet component installs."""
+"""Signed release discovery and transactional GAnet network component installs.
+
+Windows and macOS share this flow; only process control, executable format
+checks, and login autostart differ per platform.
+"""
 from __future__ import annotations
 
 import base64
@@ -22,16 +26,20 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 
+try:
+    from . import sidecar_paths
+except ImportError:  # direct script execution
+    import sidecar_paths  # type: ignore[no-redef]
+
 RELEASES_URL = os.environ.get(
     "GANET_SIDECAR_RELEASES_URL",
     "https://ganet.gaagent.ai/releases/sidecar/manifest.json",
 )
-_ROOT = Path(os.environ.get(
-    "GANET_SIDECAR_DIR",
-    os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-                 "GenericAgent", "GAnet"),
-))
-_EXECUTABLE = Path(os.environ.get("GANET_SIDECAR_EXE", str(_ROOT / "ganet-sidecar.exe")))
+_ROOT = sidecar_paths.sidecar_root()
+_EXECUTABLE = sidecar_paths.sidecar_executable()
+_IS_WIN = sidecar_paths.is_windows()
+_IS_MAC = sidecar_paths.is_macos()
+SUPPORTED_PLATFORMS = ("windows", "darwin")
 _CACHE = _ROOT / "release-cache.json"
 _CACHE_SECONDS = 6 * 60 * 60
 _MAX_MANIFEST_BYTES = 256 * 1024
@@ -199,7 +207,7 @@ def download_release(release: dict[str, Any]) -> DownloadedRelease:
     if len(data) != int(release["size"]):
         raise RuntimeError("GAnet 组件下载大小与发布清单不一致")
     directory = Path(tempfile.mkdtemp(prefix="ganet-sidecar-download-"))
-    path = directory / "ganet-sidecar.exe"
+    path = directory / sidecar_paths.executable_name()
     path.write_bytes(data)
     return DownloadedRelease(path, dict(release))
 
@@ -223,6 +231,45 @@ def _pe_architecture(path: Path) -> str:
     return architectures[machine]
 
 
+_MACHO_CPU_TYPES = {0x01000007: "amd64", 0x0100000C: "arm64"}
+
+
+def _macho_architecture(path: Path) -> str:
+    """Return the architecture of a thin Mach-O executable.
+
+    Universal (fat) binaries are rejected on purpose: the release pipeline
+    ships one file per architecture and the manifest names exactly one.
+    """
+    with path.open("rb") as stream:
+        header = stream.read(8)
+    if len(header) != 8:
+        raise RuntimeError("Mach-O 文件头不完整")
+    magic = struct.unpack("<I", header[:4])[0]
+    if magic in (0xCAFEBABE, 0xBEBAFECA):
+        raise RuntimeError("GAnet 组件不接受通用（fat）二进制")
+    if magic == 0xFEEDFACF:
+        cpu_type = struct.unpack("<I", header[4:8])[0]
+    elif magic == 0xCFFAEDFE:
+        cpu_type = struct.unpack(">I", header[4:8])[0]
+    else:
+        raise RuntimeError("下载文件不是 macOS Mach-O 程序")
+    if cpu_type not in _MACHO_CPU_TYPES:
+        raise RuntimeError("Mach-O 架构不受支持")
+    return _MACHO_CPU_TYPES[cpu_type]
+
+
+def _executable_architecture(path: Path, platform_name: str) -> str:
+    if platform_name == "windows":
+        return _pe_architecture(path)
+    if platform_name == "darwin":
+        return _macho_architecture(path)
+    raise RuntimeError("GAnet 组件不支持该平台")
+
+
+def current_platform() -> str:
+    return platform.system().lower()
+
+
 def verify_release(artifact: DownloadedRelease, release: dict[str, Any] | None = None) -> VerifiedRelease:
     release = dict(release or artifact.release)
     if artifact.release != release or not release.get("manifest_verified"):
@@ -230,9 +277,11 @@ def verify_release(artifact: DownloadedRelease, release: dict[str, Any] | None =
     digest = hashlib.sha256(artifact.path.read_bytes()).hexdigest()
     if digest != release["sha256"]:
         raise RuntimeError("GAnet 组件 SHA-256 校验失败")
-    if _pe_architecture(artifact.path) != release["architecture"]:
+    if release["platform"] not in SUPPORTED_PLATFORMS:
+        raise RuntimeError("GAnet 组件不支持该平台")
+    if _executable_architecture(artifact.path, str(release["platform"])) != release["architecture"]:
         raise RuntimeError("GAnet 组件文件架构与发布清单不一致")
-    if release["platform"] != "windows" or release["architecture"] != current_architecture():
+    if release["platform"] != current_platform() or release["architecture"] != current_architecture():
         raise RuntimeError("GAnet 组件不适用于当前电脑")
     return VerifiedRelease(artifact.path, release)
 
@@ -291,12 +340,27 @@ def inspect(*, refresh: bool = True) -> dict[str, Any]:
     return {**local, "version_state": version_state, "reason": reason}
 
 
+def _launchctl(*arguments: str, timeout: int = 30) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["launchctl", *arguments], capture_output=True, timeout=timeout)
+
+
+def _launchd_service_target() -> str:
+    return sidecar_paths.launchd_service_target()
+
+
 def _stop_running() -> None:
     state = _status()
     pid = state.get("pid")
+    if _IS_MAC:
+        # KeepAlive would immediately respawn a killed sidecar, so unload the
+        # agent first; the binary being replaced stays registered for later.
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            _launchctl("bootout", _launchd_service_target(), timeout=20)
     if pid and os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
                        timeout=20)
+    elif pid:
+        sidecar_paths.posix_terminate(int(pid))
     if os.name == "nt":
         # A wedged sidecar can hold the executable lock while its own status
         # command reports no pid; sweep by image path so an upgrade can still
@@ -366,9 +430,19 @@ def _start() -> None:
     if os.name == "nt":
         _run_interactive_task()
         return
+    if _IS_MAC and sidecar_paths.launchd_agent_path().is_file():
+        # Prefer the login agent so the process runs under launchd's
+        # supervision exactly as it will after the next login.
+        booted = _launchctl("bootstrap", f"gui/{os.getuid()}",
+                            str(sidecar_paths.launchd_agent_path()))
+        if booted.returncode == 0:
+            return
+        kicked = _launchctl("kickstart", "-k", _launchd_service_target())
+        if kicked.returncode == 0:
+            return
     subprocess.Popen([str(_EXECUTABLE), "run"], stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     close_fds=True)
+                     close_fds=True, start_new_session=True)
 
 
 def _wait_for_stable_start(version: str, *, require_online: bool = False,
@@ -419,6 +493,29 @@ def _replace_with_retry(source: Path, destination: Path, *, timeout: float = 15)
             time.sleep(0.25)
 
 
+def _mark_executable(path: Path) -> None:
+    """POSIX execute bit plus removal of any Gatekeeper quarantine mark.
+
+    The download path never sets ``com.apple.quarantine`` (urllib is not a
+    LaunchServices-aware app), but a user who fetched the file by browser and
+    dropped it in place would otherwise be blocked at first launch.
+    """
+    if os.name == "nt":
+        return
+    os.chmod(path, 0o755)
+    if _IS_MAC:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["xattr", "-d", "com.apple.quarantine", str(path)],
+                           capture_output=True, timeout=10)
+
+
+def _protect_directory() -> None:
+    if os.name == "nt":
+        _protect_windows_directory()
+        return
+    os.chmod(_ROOT, 0o700)
+
+
 def _protect_windows_directory() -> None:
     if os.name != "nt":
         return
@@ -437,12 +534,25 @@ def _protect_windows_directory() -> None:
         raise RuntimeError("GAnet 网络组件目录权限配置失败")
 
 
+def _request_screen_access_after_install() -> dict[str, Any]:
+    """Best effort: a permission hiccup must never turn a completed install into a failure."""
+    try:
+        from . import network
+    except ImportError:
+        import network  # type: ignore[no-redef]
+    try:
+        return network.request_screen_access()
+    except Exception as exc:
+        return {"granted": None, "prompted": False, "detail": f"截图权限申请未完成：{type(exc).__name__}"}
+
+
 def install_release(verified: VerifiedRelease) -> dict[str, Any]:
-    if os.name != "nt" and os.environ.get("GANET_ALLOW_NONWINDOWS_INSTALL") != "1":
-        raise RuntimeError("GAnet Windows 组件只能在 Windows 上安装")
+    if current_platform() not in SUPPORTED_PLATFORMS and \
+            os.environ.get("GANET_ALLOW_UNSUPPORTED_INSTALL") != "1":
+        raise RuntimeError("GAnet 网络组件目前只支持 Windows 与 macOS")
     _ROOT.mkdir(parents=True, exist_ok=True)
-    backup = _EXECUTABLE.with_suffix(".exe.rollback")
-    staged = _EXECUTABLE.with_suffix(".exe.new")
+    backup = _EXECUTABLE.with_name(_EXECUTABLE.name + ".rollback")
+    staged = _EXECUTABLE.with_name(_EXECUTABLE.name + ".new")
     had_old = _EXECUTABLE.is_file()
     previous_state = _status()
     replaced = False
@@ -451,11 +561,12 @@ def install_release(verified: VerifiedRelease) -> dict[str, Any]:
         # hold the executable lock that would break the replace below.
         _stop_running()
         shutil.copy2(verified.path, staged)
+        _mark_executable(staged)
         if had_old:
             shutil.copy2(_EXECUTABLE, backup)
         _replace_with_retry(staged, _EXECUTABLE)
         replaced = True
-        _protect_windows_directory()
+        _protect_directory()
         _install_autostart()
         binary = _binary_version()
         if binary.get("version") != verified.release["version"] or \
@@ -476,9 +587,15 @@ def install_release(verified: VerifiedRelease) -> dict[str, Any]:
             state = {"running": False, "online": False, "listening": False}
         with contextlib.suppress(OSError):
             backup.unlink()
-        return {"ok": True, "version": binary.get("version"), "rolled_back": False,
-                "running": bool(state.get("running")),
-                "online": bool(state.get("online")), "listening": bool(state.get("listening"))}
+        result = {"ok": True, "version": binary.get("version"), "rolled_back": False,
+                  "running": bool(state.get("running")),
+                  "online": bool(state.get("online")), "listening": bool(state.get("listening"))}
+        if _IS_MAC and state.get("listening"):
+            # A replaced binary may carry a new code identity, which macOS treats
+            # as a new app for screen recording. Ask now, while the user is at
+            # the computer, rather than at the next remote screenshot.
+            result["screen_access"] = _request_screen_access_after_install()
+        return result
     except Exception as exc:
         with contextlib.suppress(Exception):
             if _status().get("running"):

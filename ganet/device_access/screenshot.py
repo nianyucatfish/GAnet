@@ -58,7 +58,14 @@ def _enable_dpi_awareness() -> None:
 
 
 def _session_id() -> int:
-    """Report the Windows session the capture actually came from."""
+    """Report the desktop session the capture actually came from.
+
+    Windows uses the real session id. On macOS a launchd user agent already
+    runs in the login session, so the uid identifies it; the phone treats any
+    positive value as a valid interactive session.
+    """
+    if os.name != "nt":
+        return max(1, os.getuid())
     with contextlib.suppress(Exception):
         import ctypes
         value = ctypes.c_uint32()
@@ -67,15 +74,49 @@ def _session_id() -> int:
     return 0
 
 
+_MACOS_SCREEN_PERMISSION_HINT = (
+    "macOS 未授予屏幕录制权限：请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许 "
+    "ganet-sidecar，然后重试"
+)
+
+
+def _macos_screen_capture_allowed() -> bool | None:
+    """Ask TCC whether this process may capture the screen.
+
+    Without the permission ``screencapture`` still succeeds but returns only the
+    wallpaper and menu bar, so the failure must be detected up front. Returns
+    ``None`` when the check itself is unavailable.
+    """
+    try:
+        import ctypes
+        core_graphics = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        core_graphics.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        core_graphics.CGRequestScreenCaptureAccess.restype = ctypes.c_bool
+    except (OSError, AttributeError):
+        return None
+    if core_graphics.CGPreflightScreenCaptureAccess():
+        return True
+    # Triggers the one-time system prompt for the responsible process; the
+    # current call still fails so the user gets an actionable message.
+    with contextlib.suppress(Exception):
+        core_graphics.CGRequestScreenCaptureAccess()
+    return False
+
+
 def _capture_here() -> tuple[dict[str, Any], bytes]:
     """Capture the whole virtual desktop from the calling process."""
-    if os.name != "nt":
-        raise RuntimeError("电脑截图仅支持 Windows")
+    if os.name != "nt" and sys.platform != "darwin":
+        raise RuntimeError("电脑截图仅支持 Windows 与 macOS")
     try:
         from PIL import ImageGrab
     except ImportError as exc:
         raise RuntimeError("缺少电脑截图组件 Pillow") from exc
-    _enable_dpi_awareness()
+    if sys.platform == "darwin":
+        if _macos_screen_capture_allowed() is False:
+            raise RuntimeError(_MACOS_SCREEN_PERMISSION_HINT)
+    else:
+        _enable_dpi_awareness()
     image = ImageGrab.grab(all_screens=True)
     try:
         width, height = image.size
@@ -198,8 +239,11 @@ def capture_current_session() -> tuple[dict[str, Any], bytes]:
 
 def capture() -> tuple[dict[str, Any], bytes]:
     """Return verified JPEG bytes captured in the current interactive desktop session."""
+    if sys.platform == "darwin":
+        # No Session 0 detour exists on macOS; the caller is already in the GUI session.
+        return _capture_here()
     if os.name != "nt":
-        raise RuntimeError("电脑截图仅支持 Windows")
+        raise RuntimeError("电脑截图仅支持 Windows 与 macOS")
 
     work_dir = Path(tempfile.mkdtemp(prefix="ganet-screenshot-"))
     task_name = _task_name()

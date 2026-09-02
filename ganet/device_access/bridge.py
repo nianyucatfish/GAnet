@@ -173,13 +173,34 @@ def _read_stdin_request() -> Any:
         raise ValueError(f"JSON 请求无效：{exc}") from exc
 
 
+def _uses_interactive_worker() -> bool:
+    """Only Windows needs the desktop-session hop.
+
+    The Windows sidecar answers SSH from a noninteractive Session 0, so tools
+    that touch the desktop are forwarded to a worker inside the user's session.
+    On macOS the sidecar is a launchd user agent running in the GUI session
+    already; forwarding would add a process and gain nothing.
+    """
+    return os.name == "nt"
+
+
+def _dispatch_request(request: Any) -> dict[str, Any]:
+    if _uses_interactive_worker():
+        from . import interactive_worker
+        return interactive_worker.invoke(request)
+    # stdout carries the reply here, so tool prints must stay captured.
+    if isinstance(request, dict) and request.get("tool") == "computer_screenshot":
+        with _quiet_tools(True):
+            return _screenshot_response(request, current_session=True)
+    return handle(request, capture_output=True)
+
+
 def _serve_stdin() -> dict[str, Any]:
     request_id = None
     try:
         request = _read_stdin_request()
         request_id = request.get("requestId") if isinstance(request, dict) else None
-        from . import interactive_worker
-        return interactive_worker.invoke(request)
+        return _dispatch_request(request)
     except Exception as exc:
         return {"protocol": PROTOCOL_VERSION, "requestId": request_id, "ok": False,
                 "result": None, "error": f"{type(exc).__name__}: {exc}"}
@@ -203,8 +224,7 @@ def _serve_screenshot() -> int:
     try:
         request = _read_stdin_request()
         request_id = request.get("requestId") if isinstance(request, dict) else None
-        from . import interactive_worker
-        response = interactive_worker.invoke(request)
+        response = _dispatch_request(request)
         if response.get("ok") is not True:
             raise RuntimeError(str(response.get("error") or "交互截图失败"))
         image = base64.b64decode(response.pop("image"), validate=True)
@@ -218,6 +238,25 @@ def _serve_screenshot() -> int:
         sys.stdout.buffer.write(json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
         sys.stdout.buffer.flush()
         return 1
+
+
+def _screen_access() -> dict[str, Any]:
+    """Report, and on macOS request, the desktop-capture permission.
+
+    Issued through the sidecar's exec path during setup so that the TCC prompt
+    is attributed to the same responsible process that later serves the phone's
+    screenshots. Nothing is captured here.
+    """
+    result: dict[str, Any] = {"ok": True, "protocol": PROTOCOL_VERSION, "platform": sys.platform}
+    if sys.platform != "darwin":
+        result.update(granted=True, prompted=False)
+        return result
+    from .screenshot import _MACOS_SCREEN_PERMISSION_HINT, _macos_screen_capture_allowed
+    allowed = _macos_screen_capture_allowed()
+    result.update(granted=allowed, prompted=allowed is False)
+    if allowed is not True:
+        result["hint"] = _MACOS_SCREEN_PERMISSION_HINT
+    return result
 
 
 def _interactive_dispatch(request: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="验证当前电脑 GA 运行环境")
     parser.add_argument("--catalog", action="store_true", help="返回允许远程调用的正式工具描述")
     parser.add_argument("--screenshot", action="store_true", help="流式返回交互桌面截图")
+    parser.add_argument("--screen-access", action="store_true",
+                        help="检查并（macOS）申请桌面截图权限，不截图")
     parser.add_argument("--interactive-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--stop-worker", action="store_true",
                         help="停止常驻的交互桌面 Worker（部署新代码或排查时使用）")
@@ -256,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
         result = {"protocol": PROTOCOL_VERSION, **interactive_worker.stop_worker()}
     elif args.screenshot:
         return _serve_screenshot()
+    elif args.screen_access:
+        result = _screen_access()
     elif args.check:
         result = check()
     elif args.catalog:

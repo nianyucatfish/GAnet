@@ -16,6 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 def _write_component(root: Path) -> Path:
     (root / "ganet").mkdir(parents=True)
     (root / "ganet.cmd").write_text("@echo off\n", encoding="utf-8")
+    (root / "ganet.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("", encoding="utf-8")
     (root / "ganet" / "__init__.py").write_text("", encoding="utf-8")
     return root
@@ -42,8 +43,25 @@ def test_inspect_source_component_reports_stable_identity(
     assert result["git"] is False
     assert result["commit"] is None
     assert Path(result["packageRoot"]) == root.resolve()
-    assert Path(result["launcher"]) == (root / "ganet.cmd").resolve()
+    assert Path(result["launcher"]) == (root / component_location.launcher_name()).resolve()
     assert not isolated_location.exists()
+
+
+def test_launcher_name_follows_desktop_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(component_location.sys, "platform", "win32")
+    assert component_location.launcher_name() == "ganet.cmd"
+    monkeypatch.setattr(component_location.sys, "platform", "darwin")
+    assert component_location.launcher_name() == "ganet.sh"
+
+
+def test_inspect_requires_both_launchers(tmp_path: Path) -> None:
+    root = _write_component(tmp_path / "Component")
+    (root / "ganet.sh").unlink()
+
+    result = component_location.inspect_component(root)
+
+    assert result["ok"] is False
+    assert result["missing"] == ["ganet.sh"]
 
 
 def test_inspect_reports_commit_from_loose_ref(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -14,6 +15,13 @@ from . import paths
 _SCHEMA_VERSION = 1
 _STATE_ROOT = Path.home() / ".genericagent" / "ganet"
 _LOCATION_PATH = _STATE_ROOT / "component.json"
+# Both launchers ship in every checkout; the one the current desktop runs is
+# what the discovery record advertises.
+_LAUNCHER_NAMES = ("ganet.cmd", "ganet.sh")
+
+
+def launcher_name() -> str:
+    return "ganet.cmd" if sys.platform == "win32" else "ganet.sh"
 
 
 def location_path() -> Path:
@@ -51,9 +59,9 @@ def inspect_component(root: str | os.PathLike[str] | None = None) -> dict[str, A
     under the bound GenericAgent Python; there is no bundled runtime.
     """
     component_root = _resolved(root or paths.package_root())
-    launcher = component_root / "ganet.cmd"
+    launcher = component_root / launcher_name()
     required = {
-        "ganet.cmd": launcher,
+        **{name: component_root / name for name in _LAUNCHER_NAMES},
         "pyproject.toml": component_root / "pyproject.toml",
         "ganet/__init__.py": component_root / "ganet" / "__init__.py",
     }
@@ -118,5 +126,11 @@ def record_component(result: dict[str, Any]) -> Path:
 def refresh_location() -> dict[str, Any]:
     result = inspect_component()
     if result.get("ok"):
+        if sys.platform != "win32":
+            # A checkout copied without mode bits would leave the launcher inert.
+            for name in ("ganet.sh", "ganet.command"):
+                with contextlib.suppress(OSError):
+                    path = Path(result["packageRoot"]) / name
+                    path.chmod(path.stat().st_mode | 0o111)
         record_component(result)
     return result

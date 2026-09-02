@@ -614,7 +614,7 @@ def start_local_pairing() -> str:
     threading.Thread(target=_pairing_worker, args=(card["pairing_id"],), daemon=True).start()
     return ("GAnet 手机配对\n\n"
             "二维码已在本机 GAnet 用户中心 → 我的设备 → 添加设备 中显示。\n"
-            "请使用手机 GA：设置 → 设备互联 → 扫描二维码。\n"
+            "请使用手机 GA：设置 → GAnet → 扫描二维码。\n"
             "手机验证后，回到本电脑本地确认。")
 
 
@@ -760,6 +760,26 @@ def _report_with_ssh_probe(report: dict, probe: dict) -> dict:
     return updated
 
 
+def _finish_setup(report: dict, *, changed: bool) -> dict:
+    """Common tail of a successful setup: emulate the phone, then secure the
+    desktop-capture permission while the user is still at the computer.
+
+    The permission is informational, not a gate: pairing and every other tool
+    work without it, so it never turns the status away from ``ok``.
+    """
+    probe = probe_phone_ssh()
+    report = _report_with_ssh_probe(report, probe)
+    result = {"status": report["status"], "changed": changed, "environment": report,
+              "ssh_probe": probe,
+              "message": "" if probe.get("ok") else probe.get("detail", "模拟手机请求未通过")}
+    if probe.get("ok") and report["status"] == "ok":
+        access = env.request_screen_access()
+        result["screen_access"] = access
+        if access.get("granted") is not True:
+            result["message"] = access.get("detail", "")
+    return result
+
+
 def configure_environment(*, approved: bool = False,
                           tailscale_installed_by_ganet: bool = False,
                           network_switch_approved: bool = False) -> dict:
@@ -781,10 +801,7 @@ def configure_environment(*, approved: bool = False,
         # Static checks alone cannot prove the embedded SSH service accepts the
         # managed key file. Finish every GA-directed setup run with a disposable
         # public-key request.
-        probe = probe_phone_ssh()
-        report = _report_with_ssh_probe(report, probe)
-        return {"status": report["status"], "changed": False, "environment": report,
-                "ssh_probe": probe, "message": "" if probe.get("ok") else probe.get("detail", "模拟手机请求未通过")}
+        return _finish_setup(report, changed=False)
     missing_project_components = [label for key, label in (
         ("qr_component", "二维码组件"),
         ("screenshot_media", "电脑截图组件"),
@@ -851,17 +868,14 @@ def configure_environment(*, approved: bool = False,
     if report["status"] != "ok":
         return {"status": report["status"], "changed": bool(needs_ganet_configuration),
                 "environment": report}
-    probe = probe_phone_ssh()
-    report = _report_with_ssh_probe(report, probe)
-    return {"status": report["status"], "changed": bool(needs_ganet_configuration),
-            "environment": report, "ssh_probe": probe,
-            "message": "" if probe.get("ok") else probe.get("detail", "模拟手机请求未通过")}
+    return _finish_setup(report, changed=bool(needs_ganet_configuration))
 
 
 # ---- uninstall ----
 
 import os
 import shutil
+import sys
 import time
 
 _UNINSTALL_PLAN = (
@@ -944,6 +958,8 @@ def remove_environment(*, approved: bool = False) -> dict:
 
 
 def _remove_autostart(executable: Path) -> str:
+    if sys.platform == "darwin":
+        return _remove_launchd_agent(executable)
     if os.name != "nt":
         return "skipped"
     binary_present = executable.is_file()
@@ -960,6 +976,38 @@ def _remove_autostart(executable: Path) -> str:
         detail = (completed.stderr or completed.stdout or b"").decode(errors="replace")
         return "failed: " + detail.strip()[:200]
     # reg.exe reports an error for an already-absent value; absence is success.
+    return "ok"
+
+
+def _remove_launchd_agent(executable: Path) -> str:
+    """Unload and delete the login agent, with or without the sidecar binary.
+
+    The sidecar owns ``autostart remove`` when it exists; once the binary is
+    gone the same two launchd effects are reproduced directly so uninstall
+    never leaves a KeepAlive agent pointing at a missing program.
+    """
+    try:
+        from . import sidecar_paths
+    except ImportError:
+        import sidecar_paths  # type: ignore[no-redef]
+    if executable.is_file():
+        try:
+            completed = subprocess.run([str(executable), "autostart", "remove"],
+                                       capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"failed: {exc}"
+        if completed.returncode == 0:
+            return "ok"
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(["launchctl", "bootout", sidecar_paths.launchd_service_target()],
+                       capture_output=True, timeout=20)
+    plist = sidecar_paths.launchd_agent_path()
+    try:
+        plist.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return f"failed: {exc}"
     return "ok"
 
 

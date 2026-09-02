@@ -60,6 +60,44 @@ def test_check_env_keeps_cached_probe_while_service_up(monkeypatch, tmp_path):
     assert report["ssh_probe"]["detail"] == _PROBE["detail"]
 
 
+def test_check_env_downgrades_control_plane_to_warning_on_relay_health(monkeypatch, tmp_path):
+    """An online node whose relay is dead must not render a fully green chain,
+    and the wording must come from our own table, never from tsnet's message."""
+    _patch_environment(monkeypatch, tmp_path, service_up=True)
+    baseline = network.check_env()
+    runtime = {"responsive": True, "online": True, "on_ga_control": True, "running": True,
+               "listening": True, "ssh_loopback": True,
+               "health_codes": ["relay_unreachable", "other"], "relay_ok": False}
+    monkeypatch.setattr(network, "get_provider", lambda: _FakeProvider(runtime))
+    report = network.check_env()
+    node = next(n for n in report["chain"] if n["key"] == "network")
+    assert node["ok"] is True and node["level"] == "warning"
+    assert "中继" in node["detail"] and "异常" in node["detail"]
+    assert "gaagent" not in node["detail"] and "Shanghai" not in node["detail"]
+    # Health is advisory: it never changes the overall verdict.
+    assert report["status"] == baseline["status"]
+
+
+def test_check_env_control_plane_is_plain_ok_when_healthy(monkeypatch, tmp_path):
+    _patch_environment(monkeypatch, tmp_path, service_up=True)
+    report = network.check_env()
+    node = next(n for n in report["chain"] if n["key"] == "network")
+    assert node["level"] == "ok" and node["detail"] == ""
+
+
+def test_sidecar_status_carries_health_codes(monkeypatch):
+    payload = {"running": True, "online": True, "enrolled": True, "controlMatch": True,
+               "healthCodes": ["relay_unreachable"], "relayOk": False}
+    monkeypatch.setattr(network, "_json_probe", lambda cmd, timeout: (True, payload))
+    provider = network.TsnetSidecarProvider(executable=__file__)
+    state = provider.status()
+    assert state["health_codes"] == ["relay_unreachable"] and state["relay_ok"] is False
+    # Sidecars predating the field are trusted rather than flagged.
+    payload.pop("healthCodes"); payload.pop("relayOk")
+    state = provider.status()
+    assert state["health_codes"] == [] and state["relay_ok"] is True
+
+
 def _fake_env_report(*, installed, version_state):
     return {"status": "need_install" if not installed else "need_repair",
             "provider": "embedded-tsnet", "version_state": version_state,
