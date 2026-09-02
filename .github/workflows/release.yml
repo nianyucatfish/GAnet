@@ -104,20 +104,20 @@ jobs:
         env:
           VERSION: ${{ steps.identity.outputs.version }}
           GANET_MACOS_SIGNING_PEM: ${{ secrets.GANET_MACOS_SIGNING_PEM }}
-          RCODESIGN_VERSION: "0.29.0"
-          RCODESIGN_SHA256: "54bb500e2da7a8de02fcae0f331d1cac6e6d7173b4281042ff9c528ba3159aaa"
+          CODESIGN_TOOL_VERSION: "0.29.0"
+          CODESIGN_TOOL_SHA256: "54bb500e2da7a8de02fcae0f331d1cac6e6d7173b4281042ff9c528ba3159aaa"
         run: |
           set -euo pipefail
           if [[ -z "${GANET_MACOS_SIGNING_PEM}" ]]; then
             echo "GANET_MACOS_SIGNING_PEM secret is missing; macOS sidecars would carry an unstable ad-hoc identity" >&2
             exit 1
           fi
-          archive="apple-codesign-${RCODESIGN_VERSION}-x86_64-pc-windows-msvc.zip"
+          archive="apple-codesign-${CODESIGN_TOOL_VERSION}-x86_64-pc-windows-msvc.zip"
           curl -fsSL -o "${RUNNER_TEMP}/${archive}" \
-            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${archive}"
-          echo "${RCODESIGN_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${CODESIGN_TOOL_VERSION}/${archive}"
+          echo "${CODESIGN_TOOL_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
           unzip -q -o "${RUNNER_TEMP}/${archive}" -d "${RUNNER_TEMP}/rcodesign"
-          RCODESIGN=$(find "${RUNNER_TEMP}/rcodesign" -name rcodesign.exe | head -1)
+          SIGNER=$(find "${RUNNER_TEMP}/rcodesign" -name rcodesign.exe | head -1)
           umask 077
           printf '%s\n' "${GANET_MACOS_SIGNING_PEM}" > "${RUNNER_TEMP}/ganet-macos-signing.pem"
           for arch in arm64 amd64; do
@@ -125,11 +125,11 @@ jobs:
             # In-place signing is unreliable on Windows; sign to a new file and swap.
             # No RFC 3161 timestamp: TCC identity matching does not use it, and
             # Apple's timestamp service must not be able to fail a release.
-            "${RCODESIGN}" sign --pem-file "${RUNNER_TEMP}/ganet-macos-signing.pem" \
+            "${SIGNER}" sign --pem-file "${RUNNER_TEMP}/ganet-macos-signing.pem" \
               --binary-identifier ai.gaagent.ganet-sidecar --timestamp-url none \
               "${unsigned}" "${unsigned}.signed"
             mv -f "${unsigned}.signed" "${unsigned}"
-            info=$("${RCODESIGN}" print-signature-info "${unsigned}")
+            info=$("${SIGNER}" print-signature-info "${unsigned}")
             grep -q 'identifier: ai.gaagent.ganet-sidecar' <<<"${info}" || { echo "macOS ${arch} sidecar lacks the GAnet identifier" >&2; exit 1; }
             grep -q 'certificate root = H"' <<<"${info}" || { echo "macOS ${arch} sidecar lacks the certificate-bound requirement" >&2; exit 1; }
           done
