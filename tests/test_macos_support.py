@@ -263,15 +263,18 @@ def test_bridge_dispatches_in_process_off_windows(monkeypatch: pytest.MonkeyPatc
         seen["capture_output"] = capture_output
         return {"ok": True}
 
-    from ganet.device_access import interactive_worker
-
+    # interactive_worker resolves the host binding at import time, so it must
+    # not be imported here (CI has no binding); the dispatch decision is what
+    # is under test, and the worker path is only taken on Windows.
     monkeypatch.setattr(bridge.os, "name", "posix")
     monkeypatch.setattr(bridge, "handle", fake_handle)
-    monkeypatch.setattr(interactive_worker, "invoke",
-                        lambda request: pytest.fail("worker must not be used"))
+    assert bridge._uses_interactive_worker() is False
 
     response = bridge._dispatch_request({"tool": "file_read", "requestId": "req_1"})
 
     assert response == {"ok": True}
     assert seen["capture_output"] is True
     assert json.dumps(seen["request"])
+
+    monkeypatch.setattr(bridge.os, "name", "nt")
+    assert bridge._uses_interactive_worker() is True
