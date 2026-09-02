@@ -6,10 +6,10 @@ computer atomic tools is an explicit, validated host binding rather than an
 installation inside the GenericAgent source tree.
 
 > Current status: standalone component and audited release pipeline baseline.
-> Windows is the only supported desktop platform in this first pass. The Python
-> component is distributed as source from this repository via git; tagged GitHub
-> Releases publish the sidecar binary and its verification metadata. The final
-> end-user download disclaimer is still being prepared.
+> Windows (amd64) and macOS (arm64, amd64) are the supported desktop platforms.
+> The Python component is distributed as source from this repository via git;
+> tagged GitHub Releases publish the sidecar binaries and their verification
+> metadata. The final end-user download disclaimer is still being prepared.
 
 ## Repository layout
 
@@ -17,6 +17,7 @@ installation inside the GenericAgent source tree.
 ganet/                 Python package and local user center
 sidecar/ganet/         auditable tsnet sidecar source and tests
 ganet.cmd              Windows launcher
+ganet.sh               macOS/Linux launcher (ganet.command: Finder double-click)
 ```
 
 ## Run from source
@@ -32,10 +33,10 @@ python -m venv .venv
 An installed component is a git clone of this repository. It runs under the
 GenericAgent Python recorded by `configure-host`: the lightweight dependencies
 (`cryptography`, `Pillow`, `qrcode`) are installed into that interpreter, and
-`ganet.cmd` reads the bound interpreter from
-`~/.genericagent/ganet/ga_python.cmd`, so it can be double-clicked from any
-working directory without a PATH or `PYTHONPATH` setup. Updates are `git pull`,
-which also lets users merge their own local changes.
+`ganet.cmd` (Windows) or `ganet.sh` (macOS) reads the bound interpreter from
+`~/.genericagent/ganet/ga_python.cmd` / `ga_python.sh`, so it can be
+double-clicked from any working directory without a PATH or `PYTHONPATH` setup.
+Updates are `git pull`, which also lets users merge their own local changes.
 
 The component exposes a machine-readable identity check, run with any Python
 from the checkout root:
@@ -50,7 +51,7 @@ atomically refresh the non-secret discovery record at
 `~/.genericagent/ganet/component.json`. GenericAgent can use that record to find
 a previously installed or moved component, but must still call the identity
 check before trusting the recorded path. The clone location is chosen at
-install time (GenericAgent defaults to its own `temp\GAnet` directory); the
+install time (GenericAgent defaults to `~/.genericagent/components/GAnet`); the
 component remains movable, and starting it from its new location refreshes the
 record.
 
@@ -61,8 +62,10 @@ record.
 - GAuth identity remains under `~/.genericagent/gauth/`.
 - GAnet state and the explicit GenericAgent host binding remain under
   `~/.genericagent/ganet/`.
-- The Windows sidecar binary, protected state, and logs remain under
-  `%LOCALAPPDATA%\GenericAgent\GAnet\`.
+- The sidecar binary, protected state, and logs remain under
+  `%LOCALAPPDATA%\GenericAgent\GAnet\` on Windows and
+  `~/Library/Application Support/GenericAgent/GAnet/` on macOS; the macOS login
+  agent is `~/Library/LaunchAgents/ai.gaagent.ganet-sidecar.plist`.
 - A bound GenericAgent root is used only for the original computer atomic tools;
   it is not required to open the user center.
 
