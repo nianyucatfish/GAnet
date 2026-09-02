@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,6 +63,33 @@ func TestVersionCommandCarriesBuildIdentity(t *testing.T) {
 	if got["version"] != version || got["commit"] != commit ||
 		got["protocolVersion"] != protocolVersion {
 		t.Fatalf("unexpected build identity: %#v", got)
+	}
+}
+
+func TestClassifyHealthMapsMessagesToStableCodesWithoutLeakingText(t *testing.T) {
+	messages := []string{
+		"Tailscale could not connect to the 'GAnet Shanghai' relay server. Your Internet connection might be down, or the server might be temporarily unavailable.",
+		"You are logged out. The last login error was: fetch control key: Get \"https://ganet.gaagent.ai/key?v=142\": EOF",
+		"Tailscale is starting. Please wait.",
+		"Not connected to the control server; retrying.",
+		"something entirely new",
+		"Tailscale could not connect to the 'GAnet Shanghai' relay server.",
+	}
+	got := classifyHealth(messages)
+	want := []string{healthRelayUnreachable, healthLoggedOut, healthStarting, healthControlUnreachable, healthOther}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		if strings.Contains(got[i], "gaagent") || strings.Contains(got[i], "Shanghai") {
+			t.Fatalf("health code leaks server detail: %q", got[i])
+		}
+	}
+	if empty := classifyHealth(nil); empty == nil || len(empty) != 0 {
+		t.Fatalf("healthy node must report an empty (non-nil) list, got %#v", empty)
 	}
 }
 

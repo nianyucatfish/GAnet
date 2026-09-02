@@ -11,10 +11,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +44,8 @@ type runtimeState struct {
 	lastError      string
 	controlOK      bool
 	enrolled       bool
+	healthCodes    []string
+	relayOK        bool
 }
 
 type status struct {
@@ -65,6 +65,56 @@ type status struct {
 	SSHPort         int    `json:"sshPort"`
 	PID             int    `json:"pid,omitempty"`
 	ErrorCategory   string `json:"errorCategory,omitempty"`
+	// HealthCodes summarises tsnet's health warnings as stable categories.
+	// The raw messages name control and relay servers, so they stay in /diag.
+	HealthCodes []string `json:"healthCodes"`
+	// RelayOK is false while the node has no usable relay (home DERP) path;
+	// direct connections may still work, so this is a warning, not an outage.
+	RelayOK bool `json:"relayOk"`
+}
+
+// Health categories exposed to the user center. Matching is on stable
+// fragments of tailscale's health messages; unknown messages become "other"
+// rather than being dropped, so a new failure mode is never silent.
+const (
+	healthLoggedOut          = "logged_out"
+	healthRelayUnreachable   = "relay_unreachable"
+	healthControlUnreachable = "control_unreachable"
+	healthStarting           = "starting"
+	healthClockSkew          = "clock_skew"
+	healthOther              = "other"
+)
+
+func classifyHealth(messages []string) []string {
+	seen := map[string]bool{}
+	var codes []string
+	add := func(code string) {
+		if !seen[code] {
+			seen[code] = true
+			codes = append(codes, code)
+		}
+	}
+	for _, message := range messages {
+		lower := strings.ToLower(message)
+		switch {
+		case strings.Contains(lower, "logged out"):
+			add(healthLoggedOut)
+		case strings.Contains(lower, "relay server") || strings.Contains(lower, "derp"):
+			add(healthRelayUnreachable)
+		case strings.Contains(lower, "is starting"):
+			add(healthStarting)
+		case strings.Contains(lower, "clock") || strings.Contains(lower, "system time"):
+			add(healthClockSkew)
+		case strings.Contains(lower, "control") || strings.Contains(lower, "coordination server"):
+			add(healthControlUnreachable)
+		default:
+			add(healthOther)
+		}
+	}
+	if codes == nil {
+		codes = []string{}
+	}
+	return codes
 }
 
 type runtimeConfig struct {
@@ -154,45 +204,15 @@ func executablePath() string {
 	return path
 }
 
-func autostartScriptPath() string {
-	return filepath.Join(stateDir(), "ganet-sidecar-start.vbs")
-}
-
+// autostart registers or removes the login-time start of `ganet-sidecar run`.
+// The mechanism is platform specific (autostart_*.go); the contract is the
+// same: current user only, no elevation, idempotent.
 func autostart(action string) error {
-	if runtime.GOOS != "windows" {
-		return errors.New("autostart is currently supported on Windows only")
-	}
-	const valueName = "GenericAgent GAnet"
-	const runKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-	scriptPath := autostartScriptPath()
 	switch action {
 	case "install":
-		if err := os.MkdirAll(stateDir(), 0700); err != nil {
-			return fmt.Errorf("create autostart state directory: %w", err)
-		}
-		command := fmt.Sprintf("\"%s\" run", executablePath())
-		// Run with window style 0 so a long-lived tsnet process never flashes a
-		// console at logon. Keep diagnostics in the sidecar log instead.
-		script := "Set shell = CreateObject(\"WScript.Shell\")\r\n" +
-			"shell.Run \"" + strings.ReplaceAll(command, "\"", "\"\"") + "\", 0, False\r\n"
-		if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
-			return fmt.Errorf("write hidden autostart launcher: %w", err)
-		}
-		target := fmt.Sprintf("wscript.exe //B //Nologo \"%s\"", scriptPath)
-		cmd := exec.Command("reg.exe", "add", runKey, "/v", valueName, "/t", "REG_SZ", "/d", target, "/f")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("create autostart: %w: %s", err, strings.TrimSpace(string(output)))
-		}
-		return nil
+		return autostartInstall()
 	case "remove":
-		cmd := exec.Command("reg.exe", "delete", runKey, "/v", valueName, "/f")
-		if output, err := cmd.CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(output)), "unable to find") {
-			return fmt.Errorf("remove autostart: %w: %s", err, strings.TrimSpace(string(output)))
-		}
-		if err := os.Remove(scriptPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove hidden autostart launcher: %w", err)
-		}
-		return nil
+		return autostartRemove()
 	default:
 		return errors.New("usage: ganet-sidecar autostart install|remove")
 	}
@@ -229,14 +249,41 @@ func run(controlURL, hostname, authKey string, sshPort int) error {
 		st.refresh(controlURL)
 		keys, keysErr := loadAuthorizedKeys()
 		st.mu.RLock()
+		healthCodes := append([]string{}, st.healthCodes...)
 		result := status{Version: version, Commit: commit, ProtocolVersion: protocolVersion,
 			Installed: true, Running: true, Enrolled: st.enrolled,
 			Online: st.online, Listening: st.listening, ControlMatch: st.controlOK,
 			LoopbackSSH: st.loopback, SSHHostKey: st.hostKey,
 			AuthorizedKeys: keysErr == nil && len(keys) > 0,
-			IP:             st.ip, SSHPort: sshPort, PID: os.Getpid(), ErrorCategory: st.lastError}
+			IP:             st.ip, SSHPort: sshPort, PID: os.Getpid(), ErrorCategory: st.lastError,
+			HealthCodes: healthCodes, RelayOK: st.relayOK}
 		st.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
+	})
+	// Read-only mesh diagnostics (home DERP, health, peer paths) for local
+	// troubleshooting; the control listener is loopback-only.
+	mux.HandleFunc("/diag", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		st.mu.RLock()
+		server := st.server
+		st.mu.RUnlock()
+		if server == nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "network not started"})
+			return
+		}
+		client, err := server.LocalClient()
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result, err := client.Status(ctx)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(result)
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second}
@@ -316,6 +363,15 @@ func reconnectDelay(attempt int) time.Duration {
 func serveNetwork(s *tsnet.Server, st *runtimeState, controlURL string, sshPort int,
 	service *sshService, logger *log.Logger, stopping <-chan struct{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// A stop request must not wait out a 90 s login attempt: an unenrolled
+	// sidecar spends nearly all of its time inside Up.
+	go func() {
+		select {
+		case <-stopping:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	up, err := s.Up(ctx)
 	cancel()
 	if err != nil {
@@ -420,6 +476,22 @@ func (st *runtimeState) refresh(expectedControlURL string) {
 	st.online = statusErr == nil && backend.BackendState == ipn.Running.String()
 	if statusErr == nil && len(backend.TailscaleIPs) > 0 {
 		st.ip = backend.TailscaleIPs[0].String()
+	}
+	if statusErr == nil {
+		st.healthCodes = classifyHealth(backend.Health)
+		// A missing home relay is the failure that hides behind an "online"
+		// node: control works, peers cannot be reached. Self.Relay is the
+		// region code; empty means netcheck found no usable relay.
+		relayUnreachable := false
+		for _, code := range st.healthCodes {
+			if code == healthRelayUnreachable {
+				relayUnreachable = true
+			}
+		}
+		st.relayOK = backend.Self != nil && backend.Self.Relay != "" && !relayUnreachable
+	} else {
+		st.healthCodes = []string{}
+		st.relayOK = false
 	}
 	if profileErr != nil {
 		st.lastError = "profile_status"
