@@ -28,6 +28,17 @@ SOURCE_ROOT = Path("/opt/ganet-release-sync/source")
 MAX_SIDECAR_BYTES = 128 * 1024 * 1024
 SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+# Every sidecar a release must publish. `platform` is what the client compares
+# against platform.system().lower(), hence "darwin" rather than "macos".
+SIDECAR_TARGETS = (
+    {"platform": "windows", "architecture": "amd64", "suffix": ".exe"},
+    {"platform": "darwin", "architecture": "arm64", "suffix": ""},
+    {"platform": "darwin", "architecture": "amd64", "suffix": ""},
+)
+
+
+def _sidecar_name(target: dict[str, str], version_text: str) -> str:
+    return f"ganet-sidecar-{target['platform']}-{target['architecture']}-{version_text}{target['suffix']}"
 
 
 def _version(value: str) -> tuple[int, int, int]:
@@ -186,7 +197,7 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     tag_name = str(release.get("tag_name") or "")
     version = _version(tag_name)
     version_text = ".".join(str(part) for part in version)
-    sidecar_name = f"ganet-sidecar-windows-amd64-{version_text}.exe"
+    sidecar_names = {_sidecar_name(target, version_text): target for target in SIDECAR_TARGETS}
     state = _load_json(STATE_PATH)
     known_versions = [
         str(entry["version"]) for entry in _existing_releases()
@@ -203,11 +214,15 @@ def sync(tag: str | None = None) -> dict[str, Any]:
     # sync, which then applies the current asset rules.
     if state.get("release_id") == release.get("id") and \
             str(state.get("version") or "") == version_text:
-        mirrored = SIDECAR_ROOT / sidecar_name
-        entry = next((item for item in _existing_releases()
-                      if str(item.get("version")) == version_text), None)
-        if entry and mirrored.is_file() and \
-                hashlib.sha256(mirrored.read_bytes()).hexdigest() == str(entry.get("sha256")):
+        entries = [item for item in _existing_releases() if str(item.get("version")) == version_text]
+        mirrored_ok = []
+        for entry in entries:
+            mirrored = SIDECAR_ROOT / Path(str(entry.get("url") or "")).name
+            mirrored_ok.append(mirrored.is_file() and
+                               hashlib.sha256(mirrored.read_bytes()).hexdigest() == str(entry.get("sha256")))
+        # Releases mirrored before macOS existed carry only the Windows entry;
+        # they stay served as-is rather than being re-synced against today's rules.
+        if entries and all(mirrored_ok):
             return {"ok": True, "changed": False, "version": version_text,
                     "reason": "release already mirrored"}
 
@@ -219,7 +234,8 @@ def sync(tag: str | None = None) -> dict[str, Any]:
         raise RuntimeError("GitHub release contains duplicate asset names")
     by_name = {str(item.get("name")): item for item in assets if isinstance(item, dict)}
     identity_name = "sidecar-version.json"
-    required = (sidecar_name, identity_name, "SHA256SUMS.txt", "provenance.json")
+    checksummed = (*sidecar_names, identity_name)
+    required = (*checksummed, "SHA256SUMS.txt", "provenance.json")
     if any(name not in by_name for name in required):
         raise RuntimeError("GitHub release is missing required GAnet assets")
 
@@ -242,9 +258,9 @@ def sync(tag: str | None = None) -> dict[str, Any]:
                 if name in checksums:
                     raise RuntimeError(f"duplicate GitHub checksum entry: {name}")
                 checksums[name] = digest
-        if set(checksums) != {sidecar_name, identity_name}:
+        if set(checksums) != set(checksummed):
             raise RuntimeError("GitHub checksum file contains an unexpected artifact set")
-        for name in (sidecar_name, identity_name):
+        for name in checksummed:
             if checksums.get(name) != downloaded[name][1]:
                 raise RuntimeError(f"GitHub checksum mismatch: {name}")
 
@@ -253,7 +269,7 @@ def sync(tag: str | None = None) -> dict[str, Any]:
         provenance_artifacts = provenance.get("artifacts")
         if provenance.get("repository") != REPOSITORY or provenance.get("version") != version_text or \
                 not COMMIT.fullmatch(commit) or not isinstance(provenance_artifacts, list) or \
-                sorted(provenance_artifacts) != sorted((sidecar_name, identity_name)):
+                sorted(provenance_artifacts) != sorted(checksummed):
             raise RuntimeError("release provenance identity is invalid")
         identity = json.loads(downloaded[identity_name][0].read_text(encoding="utf-8-sig"))
         if identity != {"version": version_text, "commit": commit, "protocolVersion": "1"}:
@@ -270,24 +286,26 @@ def sync(tag: str | None = None) -> dict[str, Any]:
             raise RuntimeError("release tag and provenance commit do not match")
 
         _sync_source(commit)
-        sidecar_destination = SIDECAR_ROOT / sidecar_name
-        _write_atomic(sidecar_destination, downloaded[sidecar_name][0].read_bytes())
-        if hashlib.sha256(sidecar_destination.read_bytes()).hexdigest() != downloaded[sidecar_name][1]:
-            raise RuntimeError("server mirror digest verification failed")
+        for sidecar_name in sidecar_names:
+            sidecar_destination = SIDECAR_ROOT / sidecar_name
+            _write_atomic(sidecar_destination, downloaded[sidecar_name][0].read_bytes())
+            if hashlib.sha256(sidecar_destination.read_bytes()).hexdigest() != downloaded[sidecar_name][1]:
+                raise RuntimeError(f"server mirror digest verification failed: {sidecar_name}")
 
     releases = [entry for entry in _existing_releases() if entry.get("version") != version_text]
-    releases.append({
-        "architecture": "amd64",
-        "commit": commit,
-        "platform": "windows",
-        "protocol_version": "1",
-        "sha256": downloaded[sidecar_name][1],
-        "size": downloaded[sidecar_name][2],
-        "update_level": "available",
-        "url": f"https://ganet.gaagent.ai/releases/sidecar/{sidecar_name}",
-        "version": version_text,
-    })
-    releases.sort(key=lambda entry: _version(str(entry["version"])))
+    for sidecar_name, target in sidecar_names.items():
+        releases.append({
+            "architecture": target["architecture"],
+            "commit": commit,
+            "platform": target["platform"],
+            "protocol_version": "1",
+            "sha256": downloaded[sidecar_name][1],
+            "size": downloaded[sidecar_name][2],
+            "update_level": "available",
+            "url": f"https://ganet.gaagent.ai/releases/sidecar/{sidecar_name}",
+            "version": version_text,
+        })
+    releases.sort(key=lambda entry: (_version(str(entry["version"])), str(entry["platform"]), str(entry["architecture"])))
     signed = {
         "component": "ganet-sidecar",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
